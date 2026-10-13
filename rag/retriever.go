@@ -1,31 +1,34 @@
+// Package rag is the query side: rewrite a follow-up into a standalone
+// query, embed it, fetch the nearest chunks, drop weak matches, and
+// format the survivors as prompt context.
 package rag
 
 import (
 	"context"
 	"fmt"
-	"rag-course/llm"
-	"rag-course/vector"
+	"godocs-rag/llm"
+	"godocs-rag/vector"
 )
 
 const defaultTopK = 5
 
 type Options struct {
-	TopK     int
+	TopK int
+	// MinScore drops hits whose cosine similarity is below it. When
+	// every hit is dropped the model gets no excerpts and the system
+	// prompt tells it to say the docs don't cover the question. The
+	// value is chosen from the eval (see cmd/eval); 0 disables it.
+	MinScore float64
 	Rewriter *Rewriter
 }
 
-// SearchResult is the public retrieval representation used by answer
-// generation, citations, and evaluation. Keeping metadata structured avoids
-// forcing downstream consumers to parse formatted prompt text.
+// SearchResult is one retrieved chunk, independent of prompt format.
 type SearchResult struct {
-	ChunkID    string
-	DocumentID string
-	Source     string
-	Title      string
-	Content    string
-	Page       int
-	Score      float64
-	Method     string
+	ChunkID   string
+	Source    string
+	Content   string
+	ImagePath string
+	Score     float64
 }
 
 type Retriever struct {
@@ -33,6 +36,7 @@ type Retriever struct {
 	store    vector.Store
 	rewriter *Rewriter
 	topK     int
+	minScore float64
 }
 
 func New(embedder llm.Embedder, store vector.Store, opts Options) *Retriever {
@@ -45,26 +49,28 @@ func New(embedder llm.Embedder, store vector.Store, opts Options) *Retriever {
 		store:    store,
 		rewriter: opts.Rewriter,
 		topK:     topK,
+		minScore: opts.MinScore,
 	}
 }
 
+// Retrieve returns formatted context for the latest user turn, or ""
+// when nothing relevant was found.
 func (r *Retriever) Retrieve(ctx context.Context, history []llm.Message) (string, error) {
 	hits, err := r.Search(ctx, history)
 	if err != nil {
 		return "", err
 	}
-	return formatSearchContext(hits), nil
+	return formatContext(hits), nil
 }
 
-// Search returns structured vector results independently of prompt assembly.
+// Search returns the chunks relevant to the latest user turn, best
+// first, with weak matches (below MinScore) removed.
 func (r *Retriever) Search(ctx context.Context, history []llm.Message) ([]SearchResult, error) {
-	// build the query
 	query := r.buildQuery(ctx, history)
 	if query == "" {
 		return nil, nil
 	}
 
-	// get the vectors
 	vecs, err := r.embedder.Embed(ctx, []string{query})
 	if err != nil {
 		return nil, fmt.Errorf("embed query: %w", err)
@@ -73,29 +79,28 @@ func (r *Retriever) Search(ctx context.Context, history []llm.Message) ([]Search
 		return nil, nil
 	}
 
-	// get the hits
 	hits, err := r.store.Query(ctx, vecs[0], r.topK)
 	if err != nil {
 		return nil, fmt.Errorf("vector query: %w", err)
 	}
-	if len(hits) == 0 {
-		return nil, nil
-	}
-	results := make([]SearchResult, 0, len(hits))
+
+	var results []SearchResult
 	for _, h := range hits {
-		results = append(results, SearchResult{
-			ChunkID: h.ID, DocumentID: h.Metadata["document_id"], Source: h.Metadata["source"],
-			Title: h.Metadata["title"], Content: h.Content, Page: pageNumber(h.Metadata),
-			Score: float64(h.Score), Method: "vector",
-		})
+		if float64(h.Score) < r.minScore {
+			continue
+		}
+		res := SearchResult{
+			ChunkID: h.ID,
+			Source:  h.Metadata["source"],
+			Content: h.Content,
+			Score:   float64(h.Score),
+		}
+		if h.Metadata["type"] == "image" {
+			res.ImagePath = h.Metadata["image_path"]
+		}
+		results = append(results, res)
 	}
 	return results, nil
-}
-
-func pageNumber(metadata map[string]string) int {
-	var n int
-	_, _ = fmt.Sscanf(metadata["page"], "%d", &n)
-	return n
 }
 
 func (r *Retriever) buildQuery(ctx context.Context, history []llm.Message) string {

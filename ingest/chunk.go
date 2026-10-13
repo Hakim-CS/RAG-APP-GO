@@ -27,7 +27,7 @@ import "strings"
 // Indexing is byte-based for simplicity; the boundary patterns
 // ("\n\n", ". ", " ") are ASCII, so cuts cannot land mid-rune unless
 // the text contains a long run of non-ASCII with no whitespace —
-// vanishingly rare for the course's source material.
+// rare in documentation text.
 func chunk(text string, size, overlap int) []string {
 	text = strings.TrimSpace(text)
 	if text == "" {

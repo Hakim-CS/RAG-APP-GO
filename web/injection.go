@@ -3,12 +3,12 @@ package web
 import (
 	"bytes"
 	"encoding/json"
+	"godocs-rag/ingest"
 	"io"
 	"log"
 	"mime"
 	"mime/multipart"
 	"net/http"
-	"rag-course/ingest"
 	"regexp"
 )
 

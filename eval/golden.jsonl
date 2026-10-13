@@ -1,0 +1,129 @@
+{"q":"How do I wait for a group of goroutines to finish?","source":"sync.txt","contains":"A WaitGroup is a counting semaphore"}
+{"q":"How can I make sure some initialization code runs exactly once even with concurrent callers?","source":"sync.txt","contains":"Once is an object that will perform exactly one action"}
+{"q":"Is it safe to copy a mutex after using it?","source":"sync.txt","contains":"A Mutex must not be copied after first use"}
+{"q":"What lock should I use when I have many readers and few writers?","source":"sync.txt","contains":"reader/writer mutual exclusion lock"}
+{"q":"Is there a concurrent-safe map in the standard library?","source":"sync.txt","contains":"Map is like a Go map[any]any but is safe for concurrent use"}
+{"q":"How do I reuse temporary objects to reduce garbage collector pressure?","source":"sync.txt","contains":"A Pool is a set of temporary objects"}
+{"q":"How do I make a goroutine sleep until another goroutine signals an event?","source":"sync.txt","contains":"Cond implements a condition variable"}
+{"q":"How do I atomically increment a shared int64 counter?","source":"sync_atomic.txt","contains":"func AddInt64"}
+{"q":"How do I atomically swap a value only if it still equals what I expect?","source":"sync_atomic.txt","contains":"CompareAndSwap"}
+{"q":"How can I store and load an arbitrary value atomically?","source":"sync_atomic.txt","contains":"A Value provides an atomic load and store"}
+{"q":"How do I cancel a long-running operation after a timeout?","source":"context.txt","contains":"func WithTimeout"}
+{"q":"Should I store a context inside a struct?","source":"context.txt","contains":"Do not store Contexts inside a struct type"}
+{"q":"How do I pass a request-scoped value like a request ID through context?","source":"context.txt","contains":"func WithValue"}
+{"q":"What error is returned when a context deadline passes?","source":"context.txt","contains":"DeadlineExceeded"}
+{"q":"How do I find out why a context was cancelled with a custom reason?","source":"context.txt","contains":"func Cause"}
+{"q":"How can I run a callback when a context is done without starting my own goroutine?","source":"context.txt","contains":"func AfterFunc"}
+{"q":"Is it okay to pass a nil context?","source":"context.txt","contains":"Do not pass a nil Context"}
+{"q":"How do I check whether an error wraps a specific sentinel error?","source":"errors.txt","contains":"func Is(err, target error) bool"}
+{"q":"How do I extract a concrete error type from a wrapped error chain?","source":"errors.txt","contains":"func As(err error, target any) bool"}
+{"q":"How do I combine several errors into one?","source":"errors.txt","contains":"func Join"}
+{"q":"How do I wrap an error with extra context while keeping the original?","source":"fmt.txt","contains":"%w"}
+{"q":"What verb prints a struct with its field names?","source":"fmt.txt","contains":"%+v"}
+{"q":"How do I print a value in Go syntax representation?","source":"fmt.txt","contains":"%#v"}
+{"q":"How do I control the width and precision of a printed float?","source":"fmt.txt","contains":"Width is specified by an optional decimal number"}
+{"q":"How can a custom type control how it is printed by fmt?","source":"fmt.txt","contains":"Stringer"}
+{"q":"How do I parse space-separated values from a string?","source":"fmt.txt","contains":"func Sscan"}
+{"q":"What error does a reader return when there is no more input?","source":"io.txt","contains":"EOF is the error returned by Read when no more input is available"}
+{"q":"How do I copy everything from a reader to a writer?","source":"io.txt","contains":"func Copy(dst Writer, src Reader)"}
+{"q":"How do I read exactly N bytes from a reader?","source":"io.txt","contains":"func ReadFull"}
+{"q":"How do I read the whole contents of a reader into memory?","source":"io.txt","contains":"func ReadAll"}
+{"q":"How do I write to several writers at the same time, like tee?","source":"io.txt","contains":"func MultiWriter"}
+{"q":"How do I connect code expecting a writer to code expecting a reader in memory?","source":"io.txt","contains":"func Pipe"}
+{"q":"How do I stop reading after a fixed number of bytes?","source":"io.txt","contains":"func LimitReader"}
+{"q":"How do I read a file line by line?","source":"bufio.txt","contains":"Scanner provides a convenient interface for reading data"}
+{"q":"Why does my scanner fail on very long lines?","source":"bufio.txt","contains":"func (s *Scanner) Buffer"}
+{"q":"How do I split input into words instead of lines with a scanner?","source":"bufio.txt","contains":"ScanWords"}
+{"q":"Why is my buffered output missing at program exit?","source":"bufio.txt","contains":"Flush writes any buffered data"}
+{"q":"How do I check if a string starts with a given prefix?","source":"strings.txt","contains":"func HasPrefix"}
+{"q":"How do I efficiently concatenate many strings in a loop?","source":"strings.txt","contains":"A Builder is used to efficiently build a string"}
+{"q":"How do I split a string on a separator?","source":"strings.txt","contains":"func Split(s, sep string) []string"}
+{"q":"How do I compare two strings case-insensitively?","source":"strings.txt","contains":"func EqualFold"}
+{"q":"How do I split a string into two parts around the first separator?","source":"strings.txt","contains":"func Cut(s, sep string)"}
+{"q":"How do I replace every occurrence of a substring?","source":"strings.txt","contains":"func ReplaceAll"}
+{"q":"How do I remove leading and trailing whitespace?","source":"strings.txt","contains":"func TrimSpace"}
+{"q":"How do I split a string on runs of whitespace?","source":"strings.txt","contains":"func Fields"}
+{"q":"Is there a growable byte buffer with Read and Write methods?","source":"bytes.txt","contains":"A Buffer is a variable-sized buffer of bytes"}
+{"q":"How do I compare two byte slices for equality?","source":"bytes.txt","contains":"func Equal(a, b []byte) bool"}
+{"q":"How do I convert a string to an integer?","source":"strconv.txt","contains":"func Atoi"}
+{"q":"How do I parse a string as a 64-bit float?","source":"strconv.txt","contains":"func ParseFloat"}
+{"q":"How do I convert an integer to a string in a given base?","source":"strconv.txt","contains":"func FormatInt"}
+{"q":"How do I add Go-style quotes and escapes around a string?","source":"strconv.txt","contains":"func Quote"}
+{"q":"How do I parse a boolean from a string like true or 1?","source":"strconv.txt","contains":"func ParseBool"}
+{"q":"What reference date is used for time format layouts?","source":"time.txt","contains":"Mon Jan 2 15:04:05 MST 2006"}
+{"q":"How do I measure how long an operation took?","source":"time.txt","contains":"func Since"}
+{"q":"How do I run code periodically at a fixed interval?","source":"time.txt","contains":"A Ticker holds a channel"}
+{"q":"Should I compare times with == ?","source":"time.txt","contains":"Equal"}
+{"q":"What is the monotonic clock reading in time values?","source":"time.txt","contains":"Monotonic Clocks"}
+{"q":"How do I parse a duration string like 1h30m?","source":"time.txt","contains":"func ParseDuration"}
+{"q":"How do I call a function after a delay?","source":"time.txt","contains":"func AfterFunc"}
+{"q":"How do I convert a struct to JSON?","source":"encoding_json.txt","contains":"func Marshal(v any)"}
+{"q":"How do I rename a field or omit it from JSON output when empty?","source":"encoding_json.txt","contains":"omitempty"}
+{"q":"How do I decode a stream of JSON values from a reader?","source":"encoding_json.txt","contains":"func NewDecoder"}
+{"q":"How do I make JSON decoding reject unknown fields?","source":"encoding_json.txt","contains":"DisallowUnknownFields"}
+{"q":"How do I delay decoding part of a JSON document?","source":"encoding_json.txt","contains":"RawMessage"}
+{"q":"How do I customise how my type is encoded to JSON?","source":"encoding_json.txt","contains":"Marshaler is the interface implemented by types"}
+{"q":"How do I start a basic web server?","source":"net_http.txt","contains":"func ListenAndServe(addr string, handler Handler) error"}
+{"q":"How do I set timeouts on an HTTP client?","source":"net_http.txt","contains":"Timeout specifies a time limit for requests made by this"}
+{"q":"Do I need to close the response body after an HTTP request?","source":"net_http.txt","contains":"The caller must close the response body when finished with it"}
+{"q":"How do I gracefully stop an HTTP server?","source":"net_http.txt","contains":"func (s *Server) Shutdown"}
+{"q":"How do I limit the size of a request body?","source":"net_http.txt","contains":"func MaxBytesReader"}
+{"q":"How do I serve static files from a directory?","source":"net_http.txt","contains":"func FileServer"}
+{"q":"How do I register routes with HTTP method and path wildcards?","source":"net_http.txt","contains":"ServeMux is an HTTP request multiplexer"}
+{"q":"How do I read a path parameter from a matched route pattern?","source":"net_http.txt","contains":"func (r *Request) PathValue"}
+{"q":"How do I set a cookie on the response?","source":"net_http.txt","contains":"func SetCookie"}
+{"q":"How do I stream a response to the client incrementally?","source":"net_http.txt","contains":"Flusher"}
+{"q":"How do I read the value of an environment variable?","source":"os.txt","contains":"func Getenv"}
+{"q":"How do I tell if an environment variable is set but empty?","source":"os.txt","contains":"func LookupEnv"}
+{"q":"How do I create a directory and all its parents?","source":"os.txt","contains":"func MkdirAll"}
+{"q":"How do I read an entire file into memory?","source":"os.txt","contains":"func ReadFile(name string) ([]byte, error)"}
+{"q":"How do I create a temporary directory?","source":"os.txt","contains":"func MkdirTemp"}
+{"q":"How do I check whether a file does not exist?","source":"os.txt","contains":"ErrNotExist"}
+{"q":"How do I exit the program with a status code?","source":"os.txt","contains":"func Exit(code int)"}
+{"q":"How do I run an external command and capture its output?","source":"os_exec.txt","contains":"func (c *Cmd) Output() ([]byte, error)"}
+{"q":"Does exec.Command use the shell to expand globs?","source":"os_exec.txt","contains":"does not invoke the system shell"}
+{"q":"How do I kill a subprocess when a context is cancelled?","source":"os_exec.txt","contains":"func CommandContext"}
+{"q":"How do I walk a directory tree recursively?","source":"path_filepath.txt","contains":"func WalkDir"}
+{"q":"How do I join path elements portably across operating systems?","source":"path_filepath.txt","contains":"func Join(elem ...string) string"}
+{"q":"How do I get the file extension from a path?","source":"path_filepath.txt","contains":"func Ext"}
+{"q":"How do I find files matching a wildcard pattern?","source":"path_filepath.txt","contains":"func Glob"}
+{"q":"How do I sort a slice of ints?","source":"slices.txt","contains":"func Sort[S ~[]E, E cmp.Ordered](x S)"}
+{"q":"How do I sort a slice with a custom comparison function?","source":"slices.txt","contains":"func SortFunc"}
+{"q":"How do I check whether a slice contains a value?","source":"slices.txt","contains":"func Contains"}
+{"q":"How do I binary search a sorted slice?","source":"slices.txt","contains":"func BinarySearch"}
+{"q":"How do I sort while keeping equal elements in their original order?","source":"sort.txt","contains":"func SliceStable"}
+{"q":"How do I get the keys of a map as an iterator?","source":"maps.txt","contains":"func Keys"}
+{"q":"How do I copy all entries from one map into another?","source":"maps.txt","contains":"func Copy"}
+{"q":"How do I write structured key-value logs?","source":"log_slog.txt","contains":"Package slog provides structured logging"}
+{"q":"How do I output logs as JSON?","source":"log_slog.txt","contains":"func NewJSONHandler"}
+{"q":"How do I change the minimum log level at runtime?","source":"log_slog.txt","contains":"LevelVar"}
+{"q":"How do I attach common attributes to every log line from a logger?","source":"log_slog.txt","contains":"func (l *Logger) With(args ...any) *Logger"}
+{"q":"How do I write table-driven subtests?","source":"testing.txt","contains":"func (t *T) Run(name string, f func(t *T)) bool"}
+{"q":"How do I write a benchmark?","source":"testing.txt","contains":"func BenchmarkRandInt"}
+{"q":"How do I mark a test helper so failures report the caller's line?","source":"testing.txt","contains":"func (c *T) Helper()"}
+{"q":"How do I set an environment variable just for one test?","source":"testing.txt","contains":"Setenv"}
+{"q":"How do I write a fuzz test?","source":"testing.txt","contains":"func FuzzHex"}
+{"q":"How do I run tests in parallel?","source":"testing.txt","contains":"func (t *T) Parallel()"}
+{"q":"How do I define command-line flags?","source":"flag.txt","contains":"func String(name string, value string, usage string) *string"}
+{"q":"How do I bind a flag to an existing variable?","source":"flag.txt","contains":"func IntVar"}
+{"q":"How do I compile a regular expression and panic if it is invalid?","source":"regexp.txt","contains":"func MustCompile"}
+{"q":"Which regular expression syntax does Go use, and does it guarantee linear time?","source":"regexp.txt","contains":"RE2"}
+{"q":"How do I find all matches of a pattern in a string?","source":"regexp.txt","contains":"func (re *Regexp) FindAllString"}
+{"q":"How do I include static files in my binary at compile time?","source":"embed.txt","contains":"//go:embed"}
+{"q":"How do I run a SQL query that returns at most one row?","source":"database_sql.txt","contains":"func (db *DB) QueryRowContext"}
+{"q":"How do I run several SQL statements in a transaction?","source":"database_sql.txt","contains":"func (db *DB) BeginTx"}
+{"q":"How do I handle NULL values when scanning a column?","source":"database_sql.txt","contains":"NullString"}
+{"q":"How do I configure the connection pool size?","source":"database_sql.txt","contains":"func (db *DB) SetMaxOpenConns"}
+{"q":"What error do I get when a query returns no rows?","source":"database_sql.txt","contains":"ErrNoRows"}
+{"q":"How do I center a div with CSS flexbox?"}
+{"q":"What is the capital of Australia?"}
+{"q":"How do I configure a Kubernetes horizontal pod autoscaler?"}
+{"q":"How do list comprehensions work in Python?"}
+{"q":"What is the best recipe for sourdough bread?"}
+{"q":"How do I set up React Router in a single page app?"}
+{"q":"Who won the football World Cup in 2014?"}
+{"q":"How do I rebase a branch interactively in git?"}
+{"q":"What are the side effects of ibuprofen?"}
+{"q":"How do I create a virtual environment with pip?"}
+{"q":"Explain the plot of Hamlet."}
+{"q":"How do I tune a guitar to drop D?"}

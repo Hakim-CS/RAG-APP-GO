@@ -2,46 +2,17 @@ package rag
 
 import (
 	"fmt"
-	"rag-course/vector"
-	"strconv"
+	"godocs-rag/llm"
 	"strings"
 )
 
-const contextPreamble = `Use the following excerpts from the document collection to answer the question.
-Cite sources by filename when you draw from them. If the excerpts do not address the question, say so
-before answering from general knowledge.`
+const contextPreamble = `Use the following excerpts from the Go documentation to answer the question.
+Cite sources by filename when you draw from them. If the excerpts do not address the question, say so.`
 
-const unknownSource = "(unknown source)"
-
-func formatContext(hits []vector.Result) string {
-	if len(hits) == 0 {
-		return ""
-	}
-
-	var sb strings.Builder
-	sb.WriteString(contextPreamble)
-	sb.WriteString("\n\n--- Excerpts ---\n\n")
-
-	for i, h := range hits {
-		source := h.Metadata["source"]
-		if source == "" {
-			source = unknownSource
-		}
-
-		if h.Metadata["type"] == "image" && h.Metadata["image_path"] != "" {
-			fmt.Fprintf(&sb, "[%d] Source: %s [image: %s] (similarity %.2f)\n%s\n\n",
-				i+1, source, h.Metadata["image_path"], h.Score, h.Content)
-			continue
-		}
-
-		fmt.Fprintf(&sb, "[%d] Source: %s (similarity %.2f)\n%s\n\n",
-			i+1, source, h.Score, h.Content)
-	}
-
-	return strings.TrimSpace(sb.String())
-}
-
-func formatSearchContext(hits []SearchResult) string {
+// formatContext renders hits as the excerpt block placed before the
+// user's question. Image hits carry an [image: <path>] tag, which the
+// system prompt tells the model to turn into Markdown image syntax.
+func formatContext(hits []SearchResult) string {
 	if len(hits) == 0 {
 		return ""
 	}
@@ -50,13 +21,33 @@ func formatSearchContext(hits []SearchResult) string {
 	for i, h := range hits {
 		source := h.Source
 		if source == "" {
-			source = unknownSource
+			source = "(unknown source)"
 		}
-		page := ""
-		if h.Page > 0 {
-			page = ", page " + strconv.Itoa(h.Page)
+		image := ""
+		if h.ImagePath != "" {
+			image = " [image: " + h.ImagePath + "]"
 		}
-		fmt.Fprintf(&sb, "[%d] Source: %s%s (similarity %.2f)\n%s\n\n", i+1, source, page, h.Score, h.Content)
+		fmt.Fprintf(&sb, "[%d] Source: %s%s (similarity %.2f)\n%s\n\n", i+1, source, image, h.Score, h.Content)
 	}
 	return strings.TrimSpace(sb.String())
+}
+
+// WithContext returns a copy of history whose last user message is
+// prefixed with contextText. history itself is not modified, so the
+// caller's stored conversation keeps the user's original words.
+func WithContext(history []llm.Message, contextText string) []llm.Message {
+	if len(history) == 0 || contextText == "" {
+		return history
+	}
+	last := history[len(history)-1]
+	if last.Role != "user" {
+		return history
+	}
+	out := make([]llm.Message, len(history))
+	copy(out, history)
+	out[len(out)-1] = llm.Message{
+		Role:    "user",
+		Content: contextText + "\n\n--- Question ---\n\n" + last.Content,
+	}
+	return out
 }

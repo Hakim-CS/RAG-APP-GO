@@ -11,6 +11,17 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg18
+        env:
+          POSTGRES_USER: rag
+          POSTGRES_PASSWORD: rag
+          POSTGRES_DB: rag_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U rag -d rag_test"
+          --health-interval 5s --health-timeout 3s --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -20,7 +31,45 @@ jobs:
       - name: Verify formatting
         shell: bash
         run: test -z "$(gofmt -l .)"
-      - name: Test
-        run: go test -race ./...
       - name: Vet
         run: go vet ./...
+      - name: Test
+        run: go test -race ./...
+        env:
+          TEST_DATABASE_URL: postgres://rag:rag@localhost:5432/rag_test?sslmode=disable
+
+  # Retrieval-quality gate: indexes corpus/ and fails if any metric drops
+  # more than the tolerance below eval/baseline.json. Only embeddings are
+  # needed (no chat model), so a CPU Ollama is enough.
+  eval:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg18
+        env:
+          POSTGRES_USER: rag
+          POSTGRES_PASSWORD: rag
+          POSTGRES_DB: rag_eval
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U rag -d rag_eval"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+      ollama:
+        image: ollama/ollama:0.40.3
+        ports: ["11434:11434"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Pull embedding model
+        run: curl -sf http://localhost:11434/api/pull -d '{"model":"nomic-embed-text","stream":false}'
+      - name: Retrieval eval
+        shell: bash
+        run: go run ./cmd/eval | tee -a "$GITHUB_STEP_SUMMARY"
+        env:
+          EVAL_DATABASE_URL: postgres://rag:rag@localhost:5432/rag_eval?sslmode=disable
+          OPENAI_BASE_URL: http://localhost:11434/v1
+          EMBEDDING_MODEL: nomic-embed-text
+          EMBEDDING_DIM: "768"

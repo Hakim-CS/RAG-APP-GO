@@ -4,11 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"godocs-rag/llm"
+	"godocs-rag/vector"
 	"log"
 	"os"
 	"path/filepath"
-	"rag-course/llm"
-	"rag-course/vector"
 	"strings"
 	"sync"
 	"time"
@@ -16,8 +16,13 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
+// debounceDelay coalesces the burst of Create/Write events an editor or
+// copy produces into one ingest.
 const debounceDelay = 500 * time.Millisecond
 
+// Watch ingests existing files in opts.SourceDir, then every file
+// created or written there until ctx is cancelled. Successfully
+// ingested files are moved to opts.ProcessedDir.
 func Watch(ctx context.Context, opts Options, embedder llm.Embedder, store vector.Store, logger *log.Logger) error {
 	if filepath.Clean(opts.SourceDir) == filepath.Clean(opts.ProcessedDir) {
 		return errors.New("source and processed directories must differ")
@@ -45,7 +50,7 @@ func Watch(ctx context.Context, opts Options, embedder llm.Embedder, store vecto
 	}
 
 	handle := func(path string) {
-		if err := processOne(ctx, path, opts, embedder, store); err != nil {
+		if _, err := ProcessFile(ctx, path, opts, embedder, store); err != nil {
 			logger.Printf("process %s: %v", filepath.Base(path), err)
 			return
 		}
@@ -61,12 +66,16 @@ func Watch(ctx context.Context, opts Options, embedder llm.Embedder, store vecto
 	if err != nil {
 		return fmt.Errorf("read source dir: %w", err)
 	}
-	for _, e := range entries {
-		if e.IsDir() || strings.HasPrefix(e.Name(), ".") {
-			continue
+	// Backlog files are ingested one at a time so a large drop doesn't
+	// fan out into one embedding request per file at once.
+	go func() {
+		for _, e := range entries {
+			if e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+				continue
+			}
+			handle(filepath.Join(opts.SourceDir, e.Name()))
 		}
-		go handle(filepath.Join(opts.SourceDir, e.Name()))
-	}
+	}()
 
 	var (
 		timersMu sync.Mutex

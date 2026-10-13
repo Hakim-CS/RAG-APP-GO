@@ -1,233 +1,138 @@
-# Go RAG Engineering Assistant
+# godocs-rag
 
-A retrieval-augmented generation (RAG) application written in Go. The project combines an OpenAI-compatible language model, local document ingestion, and PostgreSQL with pgvector to provide answers grounded in a document collection.
+A retrieval-augmented assistant for the Go standard library, written in Go on PostgreSQL + pgvector, **with a retrieval-quality eval that gates CI.**
 
-This repository is an AI/ML engineering portfolio project focused on reliable retrieval, grounded responses, and reproducible local development. The current implementation uses vector retrieval and is being extended with structured results, evaluation, hybrid search, citations, and production safeguards.
+Generic chatbots confidently invent Go APIs. This project answers from the actual package documentation, cites the file each answer came from, and refuses when the docs don't cover the question. Every retrieval change is measured against a hand-labelled question set before it can merge.
 
-The current development setup runs locally with Ollama and Docker:
+## Current results
 
-- Ollama provides the chat and embedding models.
-- PostgreSQL with pgvector stores document chunks and vector embeddings.
-- The Go application handles ingestion, retrieval, terminal chat, and the web interface.
+Measured by `go run ./cmd/eval` over 117 in-scope and 12 out-of-scope questions (`eval/golden.jsonl`), 25 stdlib packages / 832 chunks, `nomic-embed-text`, k=5:
 
-This is an actively developed project. The codebase is intentionally small and easy to follow while the retrieval, ingestion, and chat workflows evolve.
+| Metric | Value |
+| --- | ---: |
+| Recall@1 | 0.299 |
+| Recall@5 | 0.564 |
+| MRR@5 | 0.405 |
+| Out-of-scope abstention | 0.833 |
+| Query latency p50 / p95 (embed + search, local Ollama) | 118 ms / 328 ms |
 
-## Features
+These are honest baseline numbers for plain vector search, not a finished system. The eval shows *where* it fails: in most misses the right package is retrieved but the wrong passage within it ranks higher, because dense `go doc` signature listings embed alike. That is what the next retrieval changes target (see [Roadmap](#roadmap)), and the gate makes each one prove itself.
 
-- Terminal chat through a simple REPL.
-- Browser-based chat at `/chat`.
-- Streaming responses in the terminal and web interface.
-- Markdown and plain-text document ingestion.
-- Automatic background watching of the `documents/` directory.
-- Semantic search using embeddings and pgvector.
-- Follow-up question rewriting for multi-turn conversations.
-- Optional image uploads and vision-model captions.
-- OpenAI-compatible model providers, including Ollama, OpenAI, LM Studio, and other compatible APIs.
-- Configuration validation with safe local defaults.
-- Health and readiness endpoints for service integration.
-- Stable chunk metadata for traceable retrieval results.
-- Automated Go tests, race detection, vetting, and formatting checks in GitHub Actions.
-
-## Architecture
+## How it works
 
 ```text
-                         +----------------------+
-                         |      Go application  |
-                         |  REPL + web server   |
-                         +----------+-----------+
-                                    |
-                 +------------------+------------------+
-                 |                                     |
-                 v                                     v
-        +------------------+                 +---------------------+
-        | Ollama / API     |                 | PostgreSQL + pgvector|
-        | chat + embeddings|                 | chunks + embeddings  |
-        +------------------+                 +---------------------+
+ ingest:  corpus/*.txt ─▶ chunk (≈1000 B, boundary-aware) ─▶ embed (batched) ─▶ ReplaceSource (one tx) ─▶ pgvector
+ query:   question ─▶ rewrite follow-ups ─▶ embed ─▶ HNSW cosine top-k ─▶ drop hits < min score ─▶ LLM (streamed)
 ```
 
-When a document is added, the application chunks it, creates embeddings, and stores both the text and vectors in PostgreSQL. When a user asks a question, the application embeds the question, retrieves the most relevant chunks, and sends those excerpts with the conversation to the chat model.
+- **Store:** one Postgres table with an HNSW cosine index and JSONB metadata. Re-ingesting a file replaces its chunks atomically: a failed embed or insert leaves the previous version intact.
+- **Relevance floor:** chunks below `RETRIEVAL_MIN_SCORE` (0.55) are dropped. When nothing survives, the model is told to say the docs don't cover the question. The value was picked from the eval's sweep: it refuses 10 of 12 out-of-scope questions while losing 1 of 117 in-scope hits.
+- **Providers:** any OpenAI-compatible endpoint (Ollama, OpenAI, LM Studio, vLLM). Chat and embeddings can point at different hosts.
+- **Interfaces:** terminal REPL, web chat with SSE streaming at `/chat`, document and image upload, `/healthz` and `/readyz`.
 
-## Requirements
+### The eval
 
-- Go 1.26 or later.
-- Docker Desktop with Compose support.
-- Ollama for the local development setup.
-- Internet access in the browser for the web UI's CDN-hosted frontend libraries.
+`cmd/eval` indexes `corpus/` into a throwaway database and runs every question in `eval/golden.jsonl` through the same `rag.Retriever` the app uses.
 
-The default local models are:
+- A retrieved chunk is **relevant** when it comes from the labelled source file *and* contains the labelled phrase. Labelling by phrase instead of chunk ID keeps the set valid when chunking changes, and every label is checked against the corpus at startup, so a typo can't silently become a guaranteed miss.
+- Out-of-scope questions have no source; they pass when retrieval returns nothing.
+- CI fails if recall@1, recall@k, MRR or abstention falls more than 0.02 below `eval/baseline.json`. Improvements are accepted by re-running with `-write-baseline` and committing the new file.
 
-| Purpose | Model | Dimensions |
-| --- | --- | ---: |
-| Chat and question rewriting | `gemma3` | N/A |
-| Document and query embeddings | `nomic-embed-text` | 768 |
-| Image captions | Optional vision model | N/A |
+`corpus/` is generated from the Go toolchain's own docs (`go run ./cmd/corpus`, which calls `go doc -all`) and committed, so the eval is reproducible offline.
 
-## Quick Start
+## Quick start
 
-### 1. Configure the environment
+Requirements: Go 1.26+, Docker, and [Ollama](https://ollama.com) (or any OpenAI-compatible provider).
 
-From the project root, create your local environment file:
-
-```powershell
-Copy-Item .env.example .env
-```
-
-Open `.env` and set a local PostgreSQL password. The password in `DATABASE_URL` must match `POSTGRES_PASSWORD`.
-
-Never commit `.env`. It is ignored by Git. Use `.env.example` as the safe template for collaborators.
-
-### 2. Install the local models
-
-```powershell
+```sh
+cp .env.example .env            # set a local Postgres password in both places
 ollama pull gemma3
 ollama pull nomic-embed-text
-```
-
-An image-capable model is optional. Leave `VISION_MODEL` empty if image captioning is not needed.
-
-### 3. Start PostgreSQL and pgvector
-
-```powershell
 docker compose up -d
-docker compose ps
-```
-
-The database is exposed locally on port `5432`. The application creates the pgvector extension, documents table, and indexes on startup.
-
-### 4. Run the application
-
-```powershell
+cp corpus/*.txt documents/      # the watcher indexes and moves them to documents/processed/
 go run ./cmd/rag
 ```
 
-Available interfaces:
+Then use the terminal prompt or open <http://127.0.0.1:8080/chat>.
 
-- Terminal chat: use the prompt shown in the terminal.
-- Web chat: <http://127.0.0.1:8080/chat>
-- Health: <http://127.0.0.1:8080/healthz>
-- Readiness: <http://127.0.0.1:8080/readyz>
+### Running the eval
 
-Quit terminal chat with `q`, `quit`, `exit`, or `Ctrl+C`.
+```sh
+docker compose --profile eval up -d eval-db
+go run ./cmd/eval                  # report + gate against eval/baseline.json
+go run ./cmd/eval -skip-ingest     # reuse the indexed corpus while iterating
+go run ./cmd/eval -sweep           # recall vs abstention for each min-score value
+go run ./cmd/eval -write-baseline  # accept the current numbers
+```
 
-### 5. Add documents
+### Tests
 
-Copy `.txt`, `.md`, or `.markdown` files into `documents/`. The watcher processes them automatically and moves completed files into `documents/processed/`.
-
-The sample files already in `documents/processed/` belong to the repository, but they are not automatically loaded into a fresh database. To index them:
-
-```powershell
-Copy-Item .\documents\processed\*.txt, .\documents\processed\*.md .\documents\
+```sh
+go test -race ./...
+# include the Postgres integration test:
+TEST_DATABASE_URL=postgres://rag:eval@localhost:5433/rag_eval?sslmode=disable go test ./...
 ```
 
 ## Configuration
 
-Configuration is loaded by [config/config.go](config/config.go). Real environment variables take precedence over values in `.env`.
-
 | Variable | Purpose |
 | --- | --- |
-| `OPENAI_BASE_URL` | Chat model endpoint. Ollama uses `http://localhost:11434/v1`. |
-| `OPENAI_API_KEY` | Provider key. Ollama accepts the placeholder `ollama`; hosted providers require a real key. |
-| `OPENAI_MODEL` | Chat model name, such as `gemma3:latest`. |
-| `SYSTEM_PROMPT_FILE` | Markdown file used for the system prompt. |
-| `POSTGRES_PASSWORD` | Password used by Docker Compose when initializing PostgreSQL. |
-| `DATABASE_URL` | PostgreSQL connection string used by the application. |
-| `EMBEDDING_BASE_URL` | Embedding endpoint. |
-| `EMBEDDING_API_KEY` | Optional separate embedding-provider key. |
-| `EMBEDDING_MODEL` | Embedding model name. |
-| `EMBEDDING_DIM` | Vector width. It must match the embedding model and database schema. |
-| `INGEST_DIR` | Directory watched for new documents. |
-| `PROCESSED_DIR` | Directory for successfully processed documents. |
-| `IMAGES_DIR` | Directory for uploaded images. |
-| `HTTP_ADDR` | Web server address. Use `127.0.0.1:8080` for local-only access. |
-| `VISION_MODEL` | Optional model used by `/api/caption`. |
+| `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL` | Chat endpoint. Ollama: `http://localhost:11434/v1`, key `ollama`. |
+| `EMBEDDING_BASE_URL`, `EMBEDDING_API_KEY`, `EMBEDDING_MODEL` | Embedding endpoint; defaults to the chat endpoint. |
+| `EMBEDDING_DIM` | Must match the embedding model (768 for `nomic-embed-text`). Fixed into the schema on first run. |
+| `RETRIEVAL_MIN_SCORE` | Similarity floor for retrieved chunks (default 0.55, 0 disables). |
+| `DATABASE_URL`, `POSTGRES_PASSWORD` | App database; the compose file reads the password. |
+| `EVAL_DATABASE_URL` | Eval database (truncated on every run). |
+| `SYSTEM_PROMPT_FILE` | System prompt, default `prompts/system-custom.md`. |
+| `INGEST_DIR`, `PROCESSED_DIR`, `IMAGES_DIR` | Watched folder, archive folder, uploaded images. |
+| `HTTP_ADDR` | Web server address (default `127.0.0.1:8080`). |
+| `VISION_MODEL` | Optional model for `/api/caption`. |
 
-### Using OpenAI instead of Ollama
-
-The application can use OpenAI for chat and embeddings by changing the provider settings:
-
-```env
-OPENAI_BASE_URL=https://api.openai.com/v1
-OPENAI_API_KEY=your-openai-key
-OPENAI_MODEL=gpt-4o-mini
-
-EMBEDDING_BASE_URL=https://api.openai.com/v1
-EMBEDDING_API_KEY=your-openai-key
-EMBEDDING_MODEL=text-embedding-3-small
-EMBEDDING_DIM=1536
-```
-
-Do not mix vectors from different embedding models. If `EMBEDDING_DIM` changes, recreate the local database volume and ingest the documents again:
-
-```powershell
-docker compose down -v
-docker compose up -d
-```
-
-The `down -v` command permanently deletes the local PostgreSQL data volume.
+Changing the embedding model or dimension requires a fresh table: `docker compose down -v` (this deletes the local database volume) and re-ingest.
 
 ## HTTP API
 
 | Method | Endpoint | Description |
 | --- | --- | --- |
-| `GET` | `/chat` | Browser chat interface. |
-| `POST` | `/api/chat/stream` | Streams a chat response as server-sent events. |
-| `POST` | `/api/upload` | Uploads a `.txt` or `.md` document. |
-| `POST` | `/api/upload/image` | Uploads an image and its description. |
-| `POST` | `/api/caption` | Creates an image caption when `VISION_MODEL` is configured. |
-| `GET` | `/images/*` | Serves uploaded images. |
+| `GET` | `/chat` | Browser chat UI. |
+| `POST` | `/api/chat/stream` | `{"messages":[...]}` → SSE `delta` / `done` / `error` events. Only `user`/`assistant` roles are accepted. |
+| `POST` | `/api/upload` | Ingest a `.txt` / `.md` file. |
+| `POST` | `/api/upload/image` | Ingest an image by its description. |
+| `POST` | `/api/caption` | Caption an image (when `VISION_MODEL` is set). |
+| `GET` | `/images/{file}` | Uploaded images (no directory listing). |
 
-## Project Structure
+## Project layout
 
-| Directory | Responsibility |
+| Path | Responsibility |
 | --- | --- |
-| `app/` | Application wiring and lifecycle management. |
-| `chat/` | Terminal chat interface. |
-| `cmd/rag/` | Executable entry point. |
-| `config/` | Environment loading and defaults. |
-| `ingest/` | Document chunking, embeddings, and filesystem watching. |
-| `llm/` | OpenAI-compatible chat, embedding, and vision clients. |
-| `rag/` | Retrieval, query rewriting, and prompt construction. |
-| `vector/` | Storage interface and pgvector implementation. |
-| `web/` | HTTP routes, uploads, streaming, and frontend template. |
-| `documents/` | Local knowledge-base files and processed samples. |
-| `prompts/` | System prompt files. |
+| `cmd/rag` | The app: REPL + web server + ingest watcher. |
+| `cmd/eval` | Retrieval eval and CI gate. |
+| `cmd/corpus` | Regenerates `corpus/` from `go doc`. |
+| `app/` | Wiring and lifecycle. |
+| `ingest/` | Chunking, embedding, directory watcher. |
+| `rag/` | Query rewriting, retrieval, prompt context. |
+| `vector/`, `vector/pgvector/` | Store interface and Postgres implementation. |
+| `llm/` | OpenAI-compatible chat, embedding and vision clients. |
+| `web/` | HTTP handlers, SSE, upload, injection filter, chat UI. |
+| `eval/` | Golden question set and committed baseline. |
 
-## Development
+## Known limitations
 
-Run the project tests and compiler checks with:
+- **The client owns the conversation history.** The server rejects client-sent `system` messages, but a client can still forge `assistant` turns. Server-side sessions would close this.
+- **Uploads are unauthenticated**, and uploaded documents are retrieved into the prompt, so a malicious document can attempt indirect prompt injection. The regex filter in `web/injection.go` is a tripwire, not a security boundary. Bind to `127.0.0.1` (the default).
+- Out-of-scope abstention is measured on only 12 questions; treat 0.833 as indicative.
+- Chunks are byte windows; the overlap start isn't snapped to a word boundary.
+- Conversation history is in memory only.
 
-```powershell
-go test ./...
-```
+## Roadmap
 
-Useful database commands:
+Each step is judged by the eval, not by intuition:
 
-```powershell
-docker compose ps
-docker compose logs -f postgres
-docker compose stop
-docker compose down
-```
-
-`docker compose down` removes the container but keeps the named database volume. `docker compose down -v` also deletes the stored database data.
-
-## Current Limitations and Roadmap
-
-- There are no automated tests yet for ingestion, retrieval, or HTTP behavior.
-- Only plain text and Markdown documents are currently supported.
-- Conversation history is kept in memory.
-- The local web server does not provide authentication.
-- Uploaded images and the local `.env` file are intentionally excluded from Git.
-
-The next engineering milestones are hybrid keyword/vector retrieval, source citations, PDF and web ingestion, an offline evaluation dataset, authentication, rate limiting, metrics, and a hosted demo. The project deliberately remains a modular Go monolith while these capabilities are developed.
-
-## Security Notes
-
-- Never commit `.env`, API keys, passwords, or private documents.
-- Use `127.0.0.1` for local development instead of exposing the web server on all interfaces.
-- Treat the prompt-injection filter as a basic safeguard, not a complete security boundary.
-- Rotate any key that has been committed to Git history before publishing the repository.
+1. **Hybrid retrieval:** Postgres full-text search fused with vector search via Reciprocal Rank Fusion. Targets the misses on exact identifiers (`func Atoi`, `ErrNoRows`).
+2. **Embedding task prefixes and chunking:** `nomic-embed-text` expects `search_query:` / `search_document:` prefixes, which aren't applied yet. Also chunk on `go doc` declaration boundaries.
+3. **Verified citations:** structured sources in the SSE stream, checked against the chunks actually supplied.
+4. **Server-side sessions, upload auth, rate limiting.**
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE). `corpus/` is derived from Go documentation © The Go Authors, BSD-style licence.

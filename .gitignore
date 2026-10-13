@@ -20,3 +20,8 @@ codex.md
 beginner-guide.md
 
 BEGINNER_GUIDE.md
+
+# Files ingested at runtime (the indexed corpus lives in corpus/)
+/documents/processed/
+
+CLAUDE.md

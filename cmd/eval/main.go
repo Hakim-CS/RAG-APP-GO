@@ -1,0 +1,389 @@
+// Command eval measures retrieval quality against a hand-labelled
+// question set and fails when it regresses below a committed baseline.
+//
+// It ingests corpus/ into a dedicated database (EVAL_DATABASE_URL — it is
+// truncated on every run), then runs each question in eval/golden.jsonl
+// through the same rag.Retriever the app uses. A retrieved chunk counts
+// as relevant when it comes from the case's source file and contains the
+// case's phrase; questions with no source are out of scope and should
+// retrieve nothing (abstention).
+//
+//	go run ./cmd/eval                  # report + gate against eval/baseline.json
+//	go run ./cmd/eval -write-baseline  # accept current numbers as the baseline
+//	go run ./cmd/eval -sweep           # recall/abstention per MinScore, for tuning
+package main
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"godocs-rag/config"
+	"godocs-rag/ingest"
+	"godocs-rag/llm"
+	"godocs-rag/rag"
+	"godocs-rag/vector/pgvector"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"time"
+)
+
+// Case is one line of the golden set.
+type Case struct {
+	Question string `json:"q"`
+	// Source is the corpus file that answers the question; empty means
+	// the corpus does not answer it.
+	Source string `json:"source"`
+	// Contains is a phrase (case-insensitive) that the answering
+	// passage includes. Labelling by phrase rather than chunk ID keeps
+	// the set valid when chunking changes.
+	Contains string `json:"contains"`
+}
+
+// Metrics are all higher-is-better fractions in [0, 1].
+type Metrics struct {
+	RecallAt1  float64 `json:"recall_at_1"`
+	RecallAtK  float64 `json:"recall_at_k"`
+	MRR        float64 `json:"mrr"`
+	Abstention float64 `json:"abstention"`
+}
+
+type Baseline struct {
+	Metrics
+	K        int     `json:"k"`
+	MinScore float64 `json:"min_score"`
+	Model    string  `json:"embedding_model"`
+	Cases    int     `json:"cases"`
+}
+
+// outcome is what retrieval returned for one case.
+type outcome struct {
+	rank    int // 1-based rank of the first relevant hit; 0 = none
+	hits    int
+	top     string // source of the top hit, for the miss list
+	latency time.Duration
+}
+
+func main() {
+	var (
+		corpusDir     = flag.String("corpus", "corpus", "directory of documents to index")
+		goldenPath    = flag.String("golden", "eval/golden.jsonl", "golden question set")
+		baselinePath  = flag.String("baseline", "eval/baseline.json", "baseline to gate against")
+		k             = flag.Int("k", 5, "chunks retrieved per question")
+		minScore      = flag.Float64("min-score", -1, "similarity floor (default: RETRIEVAL_MIN_SCORE / app default)")
+		tolerance     = flag.Float64("tolerance", 0.02, "allowed drop per metric before failing")
+		writeBaseline = flag.Bool("write-baseline", false, "write current metrics to -baseline instead of gating")
+		skipIngest    = flag.Bool("skip-ingest", false, "reuse the already-indexed corpus")
+		sweep         = flag.Bool("sweep", false, "print recall and abstention across MinScore values, then exit")
+	)
+	flag.Parse()
+
+	if err := run(*corpusDir, *goldenPath, *baselinePath, *k, *minScore, *tolerance, *writeBaseline, *skipIngest, *sweep); err != nil {
+		fmt.Fprintln(os.Stderr, "eval:", err)
+		os.Exit(1)
+	}
+}
+
+func run(corpusDir, goldenPath, baselinePath string, k int, minScore, tolerance float64, writeBaseline, skipIngest, sweep bool) error {
+	ctx := context.Background()
+	cfg := config.Load()
+	if minScore < 0 {
+		minScore = cfg.MinScore
+	}
+
+	dsn := os.Getenv("EVAL_DATABASE_URL")
+	if dsn == "" {
+		return errors.New("EVAL_DATABASE_URL is required (a dedicated database; it is truncated on every run)")
+	}
+	if dsn == cfg.DatabaseURL {
+		return errors.New("EVAL_DATABASE_URL must not be the app's DATABASE_URL")
+	}
+
+	cases, err := loadCases(goldenPath)
+	if err != nil {
+		return err
+	}
+	if err := checkLabels(cases, corpusDir); err != nil {
+		return err
+	}
+
+	store, err := pgvector.New(ctx, pgvector.Options{DSN: dsn, EmbeddingDim: cfg.EmbeddingDim})
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	embedder := llm.NewEmbedder(cfg)
+
+	if !skipIngest {
+		if err := indexCorpus(ctx, corpusDir, embedder, store); err != nil {
+			return err
+		}
+	}
+
+	if sweep {
+		outs, scores, err := runCases(ctx, rag.New(embedder, store, rag.Options{TopK: k}), cases)
+		if err != nil {
+			return err
+		}
+		printSweep(cases, outs, scores)
+		return nil
+	}
+
+	retriever := rag.New(embedder, store, rag.Options{TopK: k, MinScore: minScore})
+	outs, _, err := runCases(ctx, retriever, cases)
+	if err != nil {
+		return err
+	}
+	m := score(cases, outs)
+	cur := Baseline{Metrics: m, K: k, MinScore: minScore, Model: cfg.EmbeddingModel, Cases: len(cases)}
+	printReport(cur, cases, outs)
+
+	if writeBaseline {
+		data, _ := json.MarshalIndent(cur, "", "  ")
+		if err := os.WriteFile(baselinePath, append(data, '\n'), 0o644); err != nil {
+			return err
+		}
+		fmt.Printf("\nBaseline written to %s\n", baselinePath)
+		return nil
+	}
+	return gate(cur, baselinePath, tolerance)
+}
+
+func loadCases(path string) ([]Case, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var cases []Case
+	sc := bufio.NewScanner(f)
+	for line := 1; sc.Scan(); line++ {
+		text := strings.TrimSpace(sc.Text())
+		if text == "" {
+			continue
+		}
+		var c Case
+		if err := json.Unmarshal([]byte(text), &c); err != nil {
+			return nil, fmt.Errorf("%s:%d: %w", path, line, err)
+		}
+		if c.Question == "" || (c.Source == "") != (c.Contains == "") {
+			return nil, fmt.Errorf("%s:%d: need q, and source+contains together", path, line)
+		}
+		cases = append(cases, c)
+	}
+	return cases, sc.Err()
+}
+
+// checkLabels fails fast if a label can't be satisfied by the corpus, so
+// a typo or a corpus regeneration can't silently turn a case into a
+// guaranteed miss.
+func checkLabels(cases []Case, corpusDir string) error {
+	var bad []string
+	for _, c := range cases {
+		if c.Source == "" {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(corpusDir, c.Source))
+		if err != nil {
+			bad = append(bad, fmt.Sprintf("%q: %v", c.Question, err))
+			continue
+		}
+		if !containsFold(string(raw), c.Contains) {
+			bad = append(bad, fmt.Sprintf("%q: %s does not contain %q", c.Question, c.Source, c.Contains))
+		}
+	}
+	if len(bad) > 0 {
+		return fmt.Errorf("invalid labels:\n  %s", strings.Join(bad, "\n  "))
+	}
+	return nil
+}
+
+func indexCorpus(ctx context.Context, dir string, embedder llm.Embedder, store *pgvector.Store) error {
+	if err := store.Reset(ctx); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	start, total := time.Now(), 0
+	for _, e := range entries {
+		if e.IsDir() || !ingest.IsSupported(e.Name()) {
+			continue
+		}
+		n, err := ingest.ProcessFile(ctx, filepath.Join(dir, e.Name()), ingest.Options{}, embedder, store)
+		if err != nil {
+			return fmt.Errorf("ingest %s: %w", e.Name(), err)
+		}
+		total += n
+	}
+	fmt.Fprintf(os.Stderr, "indexed %d chunks in %s\n", total, time.Since(start).Round(time.Millisecond))
+	return nil
+}
+
+// runCases runs every question through the retriever. scores holds each
+// case's hit scores (best first), used by the sweep.
+func runCases(ctx context.Context, r *rag.Retriever, cases []Case) ([]outcome, [][]float64, error) {
+	outs := make([]outcome, len(cases))
+	scores := make([][]float64, len(cases))
+	for i, c := range cases {
+		start := time.Now()
+		hits, err := r.Search(ctx, []llm.Message{{Role: "user", Content: c.Question}})
+		if err != nil {
+			return nil, nil, fmt.Errorf("%q: %w", c.Question, err)
+		}
+		outs[i] = judge(c, hits)
+		outs[i].latency = time.Since(start)
+		for _, h := range hits {
+			scores[i] = append(scores[i], h.Score)
+		}
+	}
+	return outs, scores, nil
+}
+
+func judge(c Case, hits []rag.SearchResult) outcome {
+	o := outcome{hits: len(hits)}
+	if len(hits) > 0 {
+		o.top = hits[0].Source
+	}
+	for i, h := range hits {
+		if c.Source != "" && h.Source == c.Source && containsFold(h.Content, c.Contains) {
+			o.rank = i + 1
+			break
+		}
+	}
+	return o
+}
+
+func score(cases []Case, outs []outcome) Metrics {
+	var m Metrics
+	var pos, neg float64
+	for i, c := range cases {
+		o := outs[i]
+		if c.Source == "" {
+			neg++
+			if o.hits == 0 {
+				m.Abstention++
+			}
+			continue
+		}
+		pos++
+		if o.rank == 1 {
+			m.RecallAt1++
+		}
+		if o.rank > 0 {
+			m.RecallAtK++
+			m.MRR += 1 / float64(o.rank)
+		}
+	}
+	if pos > 0 {
+		m.RecallAt1 /= pos
+		m.RecallAtK /= pos
+		m.MRR /= pos
+	}
+	if neg > 0 {
+		m.Abstention /= neg
+	}
+	return m
+}
+
+func printReport(b Baseline, cases []Case, outs []outcome) {
+	lat := make([]time.Duration, len(outs))
+	for i, o := range outs {
+		lat[i] = o.latency
+	}
+	slices.Sort(lat)
+	pct := func(p float64) time.Duration { return lat[int(p*float64(len(lat)-1))].Round(time.Millisecond) }
+
+	fmt.Printf("## Retrieval eval\n\n")
+	fmt.Printf("%d cases · k=%d · min_score=%.2f · %s\n\n", b.Cases, b.K, b.MinScore, b.Model)
+	fmt.Printf("| Metric | Value |\n|---|---:|\n")
+	fmt.Printf("| Recall@1 | %.3f |\n| Recall@%d | %.3f |\n| MRR@%d | %.3f |\n", b.RecallAt1, b.K, b.RecallAtK, b.K, b.MRR)
+	fmt.Printf("| Abstention (out-of-scope) | %.3f |\n", b.Abstention)
+	fmt.Printf("| Latency p50 / p95 | %s / %s |\n", pct(0.5), pct(0.95))
+
+	var misses []string
+	for i, c := range cases {
+		o := outs[i]
+		switch {
+		case c.Source != "" && o.rank == 0:
+			misses = append(misses, fmt.Sprintf("- miss: %q (want %s, top: %s)", c.Question, c.Source, orNone(o.top)))
+		case c.Source == "" && o.hits > 0:
+			misses = append(misses, fmt.Sprintf("- answered out-of-scope: %q (top: %s)", c.Question, o.top))
+		}
+	}
+	if len(misses) > 0 {
+		fmt.Printf("\n<details><summary>%d failures</summary>\n\n%s\n\n</details>\n", len(misses), strings.Join(misses, "\n"))
+	}
+}
+
+// printSweep shows how recall@k and abstention trade off as MinScore
+// rises. Filtering the unfiltered hits by score is exactly what the
+// retriever's MinScore does.
+func printSweep(cases []Case, outs []outcome, scores [][]float64) {
+	fmt.Printf("| MinScore | Recall@k | Abstention |\n|---:|---:|---:|\n")
+	for t := 0.30; t <= 0.801; t += 0.025 {
+		filtered := make([]outcome, len(outs))
+		for i, o := range outs {
+			kept := 0
+			for _, s := range scores[i] {
+				if s >= t {
+					kept++
+				}
+			}
+			filtered[i] = outcome{hits: kept}
+			if o.rank > 0 && o.rank <= kept {
+				filtered[i].rank = o.rank
+			}
+		}
+		m := score(cases, filtered)
+		fmt.Printf("| %.3f | %.3f | %.3f |\n", t, m.RecallAtK, m.Abstention)
+	}
+}
+
+// gate fails when any metric drops more than tolerance below baseline.
+func gate(cur Baseline, path string, tolerance float64) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read baseline (create one with -write-baseline): %w", err)
+	}
+	var base Baseline
+	if err := json.Unmarshal(raw, &base); err != nil {
+		return fmt.Errorf("parse baseline: %w", err)
+	}
+	if base.K != cur.K || base.MinScore != cur.MinScore || base.Model != cur.Model || base.Cases != cur.Cases {
+		return fmt.Errorf("settings differ from baseline (k, min_score, model or case count); re-baseline with -write-baseline")
+	}
+
+	var failed []string
+	check := func(name string, got, want float64) {
+		if got < want-tolerance {
+			failed = append(failed, fmt.Sprintf("%s %.3f < baseline %.3f - %.2f", name, got, want, tolerance))
+		}
+	}
+	check("recall@1", cur.RecallAt1, base.RecallAt1)
+	check("recall@k", cur.RecallAtK, base.RecallAtK)
+	check("mrr", cur.MRR, base.MRR)
+	check("abstention", cur.Abstention, base.Abstention)
+	if len(failed) > 0 {
+		return fmt.Errorf("regression:\n  %s", strings.Join(failed, "\n  "))
+	}
+	fmt.Printf("\nGate passed (tolerance %.2f vs %s).\n", tolerance, path)
+	return nil
+}
+
+func containsFold(s, sub string) bool {
+	return strings.Contains(strings.ToLower(s), strings.ToLower(sub))
+}
+
+func orNone(s string) string {
+	if s == "" {
+		return "nothing retrieved"
+	}
+	return s
+}

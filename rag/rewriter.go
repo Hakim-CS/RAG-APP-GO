@@ -3,7 +3,7 @@ package rag
 import (
 	"context"
 	"fmt"
-	"rag-course/llm"
+	"godocs-rag/llm"
 	"strings"
 )
 

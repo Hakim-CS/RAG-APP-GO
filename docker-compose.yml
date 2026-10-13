@@ -22,5 +22,24 @@ services:
       timeout: 3s
       retries: 10
 
+  # Throwaway database for cmd/eval (truncated on every run). Start with:
+  #   docker compose --profile eval up -d eval-db
+  eval-db:
+    image: pgvector/pgvector:pg18
+    profiles: [eval]
+    environment:
+      POSTGRES_USER: rag
+      POSTGRES_PASSWORD: eval
+      POSTGRES_DB: rag_eval
+    ports:
+      - "5433:5432"
+    tmpfs:
+      - /var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rag -d rag_eval"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
 volumes:
   pgdata:

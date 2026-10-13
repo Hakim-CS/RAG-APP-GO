@@ -6,6 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"godocs-rag/ingest"
+	"godocs-rag/llm"
+	"godocs-rag/rag"
+	"godocs-rag/vector"
 	"html/template"
 	"io"
 	"io/fs"
@@ -13,10 +17,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"rag-course/ingest"
-	"rag-course/llm"
-	"rag-course/rag"
-	"rag-course/vector"
 	"strings"
 	"time"
 
@@ -36,7 +36,6 @@ type uploadResponse struct {
 }
 
 type Options struct {
-	Addr             string
 	SystemPromptFile string
 	Title            string
 	Store            vector.Store
@@ -66,7 +65,7 @@ func New(client, embedder *llm.Client, retriever *rag.Retriever, opts Options) (
 
 	title := opts.Title
 	if title == "" {
-		title = "RAG Chat"
+		title = "Go Docs Assistant"
 	}
 
 	return &Server{
@@ -99,14 +98,27 @@ func (s *Server) Routes() http.Handler {
 		}
 	})
 
-	fs := http.FileServer(http.Dir(s.imagesDir))
-	r.Handle("/images/*", http.StripPrefix("/images", fs))
+	if s.imagesDir != "" {
+		r.Handle("/images/*", http.StripPrefix("/images", noDirListing(http.FileServer(http.Dir(s.imagesDir)))))
+	}
 
 	if s.client.HasVision() {
 		r.Post("/api/caption", s.handleCaption)
 	}
 
 	return r
+}
+
+// noDirListing 404s directory paths so the images directory can't be
+// enumerated; individual files are still served.
+func noDirListing(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/") {
+			http.NotFound(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -207,7 +219,7 @@ func (s *Server) handleUploadImage(w http.ResponseWriter, r *http.Request) {
 
 	original := filepath.Base(header.Filename)
 	if !ingest.IsImage(original) {
-		http.Error(w, "unsuppored image format (allowed: .png, .jpg, .jpeg, .webp, .gif)", http.StatusUnsupportedMediaType)
+		http.Error(w, "unsupported image format (allowed: .png, .jpg, .jpeg, .webp, .gif)", http.StatusUnsupportedMediaType)
 		return
 	}
 
@@ -282,7 +294,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
 
 	if err := r.ParseMultipartForm(maxUploadBytes); err != nil {
-		http.Error(w, "upload too large or malfored: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, "upload too large or malformed: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -339,17 +351,12 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 
 	var req chatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json:"+err.Error(), http.StatusBadRequest)
+		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	if len(req.Messages) == 0 {
-		http.Error(w, "messages must not be empty", http.StatusBadRequest)
-		return
-	}
-
-	if last := req.Messages[len(req.Messages)-1]; last.Role != "user" {
-		http.Error(w, "last message must be from user", http.StatusBadRequest)
+	if err := validateHistory(req.Messages); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -364,7 +371,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			log.Printf("[web] retrieval error: %v", err)
 		} else {
-			turn = withInlineContext(history, ctxText)
+			turn = rag.WithContext(history, ctxText)
 		}
 	}
 
@@ -394,21 +401,23 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	send("done", `""`)
 }
 
-func withInlineContext(history []llm.Message, contextText string) []llm.Message {
-	if len(history) == 0 || contextText == "" {
-		return history
+// validateHistory enforces the shape of a client-supplied conversation.
+// Only user and assistant turns are accepted: the system prompt is
+// server-owned, and a client-sent "system" message would otherwise
+// reach the model as a real instruction.
+func validateHistory(msgs []llm.Message) error {
+	if len(msgs) == 0 {
+		return errors.New("messages must not be empty")
 	}
-	last := history[len(history)-1]
-	if last.Role != "user" {
-		return history
+	for i, m := range msgs {
+		if m.Role != "user" && m.Role != "assistant" {
+			return fmt.Errorf("messages[%d]: role must be \"user\" or \"assistant\"", i)
+		}
 	}
-	out := make([]llm.Message, len(history))
-	copy(out, history)
-	out[len(out)-1] = llm.Message{
-		Role:    "user",
-		Content: contextText + "\n\n--- Question ---\n\n" + last.Content,
+	if msgs[len(msgs)-1].Role != "user" {
+		return errors.New("last message must be from user")
 	}
-	return out
+	return nil
 }
 
 func (s *Server) handleChatPage(w http.ResponseWriter, r *http.Request) {
@@ -428,21 +437,16 @@ func (s *Server) Run(ctx context.Context, addr string) error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
+	// Buffered so the goroutine can always deliver and exit, whichever
+	// select branch runs.
 	errCh := make(chan error, 1)
-	go func() {
-		err := srv.ListenAndServe()
-		if !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
-		}
-		errCh <- nil
-	}()
+	go func() { errCh <- srv.ListenAndServe() }()
 
 	select {
 	case <-ctx.Done():
-		shutDownCtrx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = srv.Shutdown(shutDownCtrx)
-		return nil
+		return srv.Shutdown(shutdownCtx)
 	case err := <-errCh:
 		return err
 	}

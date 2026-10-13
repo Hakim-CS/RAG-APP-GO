@@ -1,0 +1,4 @@
+# The corpus and eval set are byte-for-byte inputs to the eval: CRLF
+# conversion would change chunk boundaries and the measured numbers.
+corpus/** text eol=lf
+eval/** text eol=lf
