@@ -1,0 +1,22 @@
+.env
+.env.*
+!.env.example
+
+.DS_Store
+*.log
+
+/bin/
+/dist/
+/tmp/
+
+/documents/images/*
+!/documents/images/.gitkeep
+
+# add graphify-out folder to gitignore
+/graphify-out
+graphify-out/**
+
+codex.md
+beginner-guide.md
+
+BEGINNER_GUIDE.md
