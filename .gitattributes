@@ -2,3 +2,4 @@
 # conversion would change chunk boundaries and the measured numbers.
 corpus/** text eol=lf
 eval/** text eol=lf
+
