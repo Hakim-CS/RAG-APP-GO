@@ -127,3 +127,21 @@
 {"q":"How do I create a virtual environment with pip?"}
 {"q":"Explain the plot of Hamlet."}
 {"q":"How do I tune a guitar to drop D?"}
+{"q":"How do I run a few goroutines with errgroup and cancel the rest when one fails?"}
+{"q":"How do I parse a YAML config file into a struct?"}
+{"q":"How do I connect to Redis and set a key that expires after an hour?"}
+{"q":"How do I generate a random UUID?"}
+{"q":"How can I send an email through an SMTP server?"}
+{"q":"How should I hash user passwords before storing them, with bcrypt?"}
+{"q":"How do I get a random integer between 1 and 100?"}
+{"q":"How do I find which functions use the most CPU in my server with pprof?"}
+{"q":"How do I read rows from a CSV file?"}
+{"q":"How do I define a gRPC service and generate the server code?"}
+{"q":"How do I cross-compile my program for Linux on ARM from a Windows machine?"}
+{"q":"How do I call a C library from Go with cgo?"}
+{"q":"How do I generate mocks for an interface with gomock?"}
+{"q":"How do I validate a JWT bearer token in HTTP middleware?"}
+{"q":"How do I generate OpenAPI/Swagger docs for my REST API?"}
+{"q":"What should a multi-stage Dockerfile for a Go service look like?"}
+{"q":"How do I make my server restart automatically when I change the code?"}
+{"q":"How do I check my tests for data races?"}

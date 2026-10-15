@@ -6,17 +6,23 @@ Generic chatbots confidently invent Go APIs. This project answers from the actua
 
 ## Current results
 
-Measured by `go run ./cmd/eval` over 117 in-scope and 12 out-of-scope questions (`eval/golden.jsonl`), 25 stdlib packages / 832 chunks, `nomic-embed-text`, k=5:
+Measured by `go run ./cmd/eval` over 117 in-scope and 30 out-of-scope questions (`eval/golden.jsonl`), 25 stdlib packages / 832 chunks, `nomic-embed-text`, k=5:
 
 | Metric | Value |
 | --- | ---: |
 | Recall@1 | 0.299 |
 | Recall@5 | 0.564 |
 | MRR@5 | 0.405 |
-| Out-of-scope abstention | 0.833 |
-| Query latency p50 / p95 (embed + search, local Ollama) | 118 ms / 328 ms |
+| Out-of-scope abstention | 0.500 |
+| Misses: right file / wrong file | 50 / 1 |
+| Query latency p50 / p95 (embed + search, local Ollama) | 28 ms / 122 ms |
 
-These are honest baseline numbers for plain vector search, not a finished system. The eval shows *where* it fails: in most misses the right package is retrieved but the wrong passage within it ranks higher, because dense `go doc` signature listings embed alike. That is what the next retrieval changes target (see [Roadmap](#roadmap)), and the gate makes each one prove itself.
+These are honest baseline numbers for plain vector search, not a finished system. The eval shows *where* it fails:
+
+- **Ranking, not coverage.** 50 of the 51 misses retrieve the right file but rank the wrong passage higher, because dense `go doc` signature listings embed alike.
+- **Near-domain questions.** Only 5 of the 18 questions about libraries and tools these packages don't document (errgroup, YAML, bcrypt, pprof) are refused; they score as close to the docs as real questions do.
+
+That is what the next retrieval changes target (see [Roadmap](#roadmap)), and the gate makes each one prove itself.
 
 ## How it works
 
@@ -26,7 +32,7 @@ These are honest baseline numbers for plain vector search, not a finished system
 ```
 
 - **Store:** one Postgres table with an HNSW cosine index and JSONB metadata. Re-ingesting a file replaces its chunks atomically: a failed embed or insert leaves the previous version intact.
-- **Relevance floor:** chunks below `RETRIEVAL_MIN_SCORE` (0.55) are dropped. When nothing survives, the model is told to say the docs don't cover the question. The value was picked from the eval's sweep: it refuses 10 of 12 out-of-scope questions while losing 1 of 117 in-scope hits.
+- **Relevance floor:** chunks below `RETRIEVAL_MIN_SCORE` (0.55) are dropped. When nothing survives, the model is told to say the docs don't cover the question. The value was picked from the eval's sweep as the highest floor that loses at most one in-scope hit (it loses 1 of 117). At that floor it refuses 15 of 30 out-of-scope questions: 10 of the 12 unrelated ones, 5 of the 18 near-domain ones.
 - **Providers:** any OpenAI-compatible endpoint (Ollama, OpenAI, LM Studio, vLLM). Chat and embeddings can point at different hosts.
 - **Interfaces:** terminal REPL, web chat with SSE streaming at `/chat`, document and image upload, `/healthz` and `/readyz`.
 
@@ -35,7 +41,8 @@ These are honest baseline numbers for plain vector search, not a finished system
 `cmd/eval` indexes `corpus/` into a throwaway database and runs every question in `eval/golden.jsonl` through the same `rag.Retriever` the app uses.
 
 - A retrieved chunk is **relevant** when it comes from the labelled source file *and* contains the labelled phrase. Labelling by phrase instead of chunk ID keeps the set valid when chunking changes, and every label is checked against the corpus at startup, so a typo can't silently become a guaranteed miss.
-- Out-of-scope questions have no source; they pass when retrieval returns nothing.
+- Out-of-scope questions have no source; they pass when retrieval returns nothing. Most of them are near-domain: Go questions about libraries and tools these 25 packages don't document, which are much harder to refuse than unrelated questions.
+- The report splits misses into *right file* (a ranking problem) and *wrong file* (a coverage problem), so each change can target the one that dominates.
 - CI fails if recall@1, recall@k, MRR or abstention falls more than 0.02 below `eval/baseline.json`. Improvements are accepted by re-running with `-write-baseline` and committing the new file.
 
 `corpus/` is generated from the Go toolchain's own docs (`go run ./cmd/corpus`, which calls `go doc -all`) and committed, so the eval is reproducible offline.
@@ -120,7 +127,7 @@ Changing the embedding model or dimension requires a fresh table: `docker compos
 
 - **The client owns the conversation history.** The server rejects client-sent `system` messages, but a client can still forge `assistant` turns. Server-side sessions would close this.
 - **Uploads are unauthenticated**, and uploaded documents are retrieved into the prompt, so a malicious document can attempt indirect prompt injection. The regex filter in `web/injection.go` is a tripwire, not a security boundary. Bind to `127.0.0.1` (the default).
-- Out-of-scope abstention is measured on only 12 questions; treat 0.833 as indicative.
+- Abstention is measured on 30 out-of-scope questions. At the current floor, in-scope and near-domain questions score too close together to separate cleanly: raising the floor to 0.575 refuses 25 of 30 but drops recall@5 from 0.564 to 0.538.
 - Chunks are byte windows; the overlap start isn't snapped to a word boundary.
 - Conversation history is in memory only.
 
