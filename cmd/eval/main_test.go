@@ -36,3 +36,16 @@ func TestJudgeAndScore(t *testing.T) {
 		}
 	}
 }
+
+// A miss where the right file was retrieved is a ranking problem, not a
+// coverage problem; the report counts the two separately.
+func TestJudgeMarksRightFileWrongPassage(t *testing.T) {
+	c := Case{Question: "q", Source: "os.txt", Contains: "Getenv"}
+	o := judge(c, []rag.SearchResult{{Source: "io.txt", Content: "Getenv"}, {Source: "os.txt", Content: "Setenv"}})
+	if o.rank != 0 || !o.sourceHit {
+		t.Fatalf("rank=%d sourceHit=%v, want 0 and true", o.rank, o.sourceHit)
+	}
+	if o := judge(c, []rag.SearchResult{{Source: "io.txt", Content: "Getenv"}}); o.sourceHit {
+		t.Fatal("sourceHit = true for a wrong-file miss")
+	}
+}

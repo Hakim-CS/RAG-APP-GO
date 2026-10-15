@@ -62,10 +62,13 @@ type Baseline struct {
 
 // outcome is what retrieval returned for one case.
 type outcome struct {
-	rank    int // 1-based rank of the first relevant hit; 0 = none
-	hits    int
-	top     string // source of the top hit, for the miss list
-	latency time.Duration
+	rank int // 1-based rank of the first relevant hit; 0 = none
+	hits int
+	// sourceHit is true when any hit came from the labelled source, which
+	// separates ranking misses (right file) from coverage misses.
+	sourceHit bool
+	top       string // source of the top hit, for the miss list
+	latency   time.Duration
 }
 
 func main() {
@@ -252,7 +255,11 @@ func judge(c Case, hits []rag.SearchResult) outcome {
 		o.top = hits[0].Source
 	}
 	for i, h := range hits {
-		if c.Source != "" && h.Source == c.Source && containsFold(h.Content, c.Contains) {
+		if c.Source == "" || h.Source != c.Source {
+			continue
+		}
+		o.sourceHit = true
+		if containsFold(h.Content, c.Contains) {
 			o.rank = i + 1
 			break
 		}
@@ -300,23 +307,33 @@ func printReport(b Baseline, cases []Case, outs []outcome) {
 	slices.Sort(lat)
 	pct := func(p float64) time.Duration { return lat[int(p*float64(len(lat)-1))].Round(time.Millisecond) }
 
+	var misses []string
+	var rightFile, wrongFile int
+	for i, c := range cases {
+		o := outs[i]
+		switch {
+		case c.Source != "" && o.rank == 0:
+			kind := "wrong file"
+			if o.sourceHit {
+				kind = "right file"
+				rightFile++
+			} else {
+				wrongFile++
+			}
+			misses = append(misses, fmt.Sprintf("- miss (%s): %q (want %s, top: %s)", kind, c.Question, c.Source, orNone(o.top)))
+		case c.Source == "" && o.hits > 0:
+			misses = append(misses, fmt.Sprintf("- answered out-of-scope: %q (top: %s)", c.Question, o.top))
+		}
+	}
+
 	fmt.Printf("## Retrieval eval\n\n")
 	fmt.Printf("%d cases · k=%d · min_score=%.2f · %s\n\n", b.Cases, b.K, b.MinScore, b.Model)
 	fmt.Printf("| Metric | Value |\n|---|---:|\n")
 	fmt.Printf("| Recall@1 | %.3f |\n| Recall@%d | %.3f |\n| MRR@%d | %.3f |\n", b.RecallAt1, b.K, b.RecallAtK, b.K, b.MRR)
 	fmt.Printf("| Abstention (out-of-scope) | %.3f |\n", b.Abstention)
+	fmt.Printf("| Misses (right file / wrong file) | %d / %d |\n", rightFile, wrongFile)
 	fmt.Printf("| Latency p50 / p95 | %s / %s |\n", pct(0.5), pct(0.95))
 
-	var misses []string
-	for i, c := range cases {
-		o := outs[i]
-		switch {
-		case c.Source != "" && o.rank == 0:
-			misses = append(misses, fmt.Sprintf("- miss: %q (want %s, top: %s)", c.Question, c.Source, orNone(o.top)))
-		case c.Source == "" && o.hits > 0:
-			misses = append(misses, fmt.Sprintf("- answered out-of-scope: %q (top: %s)", c.Question, o.top))
-		}
-	}
 	if len(misses) > 0 {
 		fmt.Printf("\n<details><summary>%d failures</summary>\n\n%s\n\n</details>\n", len(misses), strings.Join(misses, "\n"))
 	}
