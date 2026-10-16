@@ -54,10 +54,12 @@ type Metrics struct {
 
 type Baseline struct {
 	Metrics
-	K        int     `json:"k"`
-	MinScore float64 `json:"min_score"`
-	Model    string  `json:"embedding_model"`
-	Cases    int     `json:"cases"`
+	K           int     `json:"k"`
+	MinScore    float64 `json:"min_score"`
+	Model       string  `json:"embedding_model"`
+	Scheme      string  `json:"embed_scheme"`
+	QueryPrefix string  `json:"query_prefix"`
+	Cases       int     `json:"cases"`
 }
 
 // outcome is what retrieval returned for one case.
@@ -71,31 +73,49 @@ type outcome struct {
 	latency   time.Duration
 }
 
+type options struct {
+	corpus, golden, baseline, out, split string
+	k                                    int
+	minScore, tolerance                  float64
+	writeBaseline, skipIngest, sweep     bool
+}
+
 func main() {
-	var (
-		corpusDir     = flag.String("corpus", "corpus", "directory of documents to index")
-		goldenPath    = flag.String("golden", "eval/golden.jsonl", "golden question set")
-		baselinePath  = flag.String("baseline", "eval/baseline.json", "baseline to gate against")
-		k             = flag.Int("k", 5, "chunks retrieved per question")
-		minScore      = flag.Float64("min-score", -1, "similarity floor (default: RETRIEVAL_MIN_SCORE / app default)")
-		tolerance     = flag.Float64("tolerance", 0.02, "allowed drop per metric before failing")
-		writeBaseline = flag.Bool("write-baseline", false, "write current metrics to -baseline instead of gating")
-		skipIngest    = flag.Bool("skip-ingest", false, "reuse the already-indexed corpus")
-		sweep         = flag.Bool("sweep", false, "print recall and abstention across MinScore values, then exit")
-	)
+	var o options
+	flag.StringVar(&o.corpus, "corpus", "corpus", "directory of documents to index")
+	flag.StringVar(&o.golden, "golden", "eval/golden.jsonl", "golden question set")
+	flag.StringVar(&o.baseline, "baseline", "eval/baseline.json", "baseline to gate against")
+	flag.StringVar(&o.out, "out", "", "also write per-question results to this JSON file (for -compare)")
+	flag.StringVar(&o.split, "split", "", `evaluate one half of the questions: "dev" (for tuning) or "test" (for reporting)`)
+	flag.IntVar(&o.k, "k", 5, "chunks retrieved per question")
+	flag.Float64Var(&o.minScore, "min-score", -1, "similarity floor (default: RETRIEVAL_MIN_SCORE / app default)")
+	flag.Float64Var(&o.tolerance, "tolerance", 0.02, "allowed drop per metric before failing")
+	flag.BoolVar(&o.writeBaseline, "write-baseline", false, "write current metrics to -baseline instead of gating")
+	flag.BoolVar(&o.skipIngest, "skip-ingest", false, "reuse the already-indexed corpus")
+	flag.BoolVar(&o.sweep, "sweep", false, "print recall and abstention across MinScore values, then exit")
+	compareRuns := flag.Bool("compare", false, "compare two -out files given as arguments (A then B), then exit")
 	flag.Parse()
 
-	if err := run(*corpusDir, *goldenPath, *baselinePath, *k, *minScore, *tolerance, *writeBaseline, *skipIngest, *sweep); err != nil {
+	var err error
+	switch {
+	case *compareRuns && flag.NArg() != 2:
+		err = errors.New("-compare needs two result files: A.json B.json")
+	case *compareRuns:
+		err = runCompare(flag.Arg(0), flag.Arg(1))
+	default:
+		err = run(o)
+	}
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "eval:", err)
 		os.Exit(1)
 	}
 }
 
-func run(corpusDir, goldenPath, baselinePath string, k int, minScore, tolerance float64, writeBaseline, skipIngest, sweep bool) error {
+func run(o options) error {
 	ctx := context.Background()
 	cfg := config.Load()
-	if minScore < 0 {
-		minScore = cfg.MinScore
+	if o.minScore < 0 {
+		o.minScore = cfg.MinScore
 	}
 
 	dsn := os.Getenv("EVAL_DATABASE_URL")
@@ -106,12 +126,22 @@ func run(corpusDir, goldenPath, baselinePath string, k int, minScore, tolerance 
 		return errors.New("EVAL_DATABASE_URL must not be the app's DATABASE_URL")
 	}
 
-	cases, err := loadCases(goldenPath)
+	cases, err := loadCases(o.golden)
 	if err != nil {
 		return err
 	}
-	if err := checkLabels(cases, corpusDir); err != nil {
+	if err := checkLabels(cases, o.corpus); err != nil {
 		return err
+	}
+	switch o.split {
+	case "":
+	case "dev", "test":
+		if o.writeBaseline {
+			return errors.New("the baseline covers every question; drop -split")
+		}
+		cases = slices.DeleteFunc(cases, func(c Case) bool { return half(c.Question) != o.split })
+	default:
+		return errors.New(`-split must be "dev" or "test"`)
 	}
 
 	store, err := pgvector.New(ctx, pgvector.Options{DSN: dsn, EmbeddingDim: cfg.EmbeddingDim})
@@ -121,39 +151,66 @@ func run(corpusDir, goldenPath, baselinePath string, k int, minScore, tolerance 
 	defer store.Close()
 	embedder := llm.NewEmbedder(cfg)
 
-	if !skipIngest {
-		if err := indexCorpus(ctx, corpusDir, embedder, store); err != nil {
+	if !o.skipIngest {
+		if err := indexCorpus(ctx, o.corpus, embedder, store); err != nil {
 			return err
 		}
 	}
+	// With -skip-ingest the index may come from a run with other prefixes;
+	// comparing across schemes would measure the mismatch, not the change.
+	if err := store.CheckScheme(ctx, embedder.Scheme()); err != nil {
+		return err
+	}
 
-	if sweep {
-		outs, scores, err := runCases(ctx, rag.New(embedder, store, rag.Options{TopK: k}), cases)
-		if err != nil {
-			return err
-		}
-		printSweep(cases, outs, scores)
+	// The unfiltered pass gives each question's best score, for the sweep
+	// and for the floor-independent separation AUC.
+	rawOuts, scores, err := runCases(ctx, rag.New(embedder, store, rag.Options{TopK: o.k}), cases)
+	if err != nil {
+		return err
+	}
+	if o.sweep {
+		printSweep(cases, rawOuts, scores)
 		return nil
 	}
 
-	retriever := rag.New(embedder, store, rag.Options{TopK: k, MinScore: minScore})
+	retriever := rag.New(embedder, store, rag.Options{TopK: o.k, MinScore: o.minScore})
 	outs, _, err := runCases(ctx, retriever, cases)
 	if err != nil {
 		return err
 	}
-	m := score(cases, outs)
-	cur := Baseline{Metrics: m, K: k, MinScore: minScore, Model: cfg.EmbeddingModel, Cases: len(cases)}
-	printReport(cur, cases, outs)
+	cur := Baseline{
+		Metrics: score(cases, outs), K: o.k, MinScore: o.minScore, Model: cfg.EmbeddingModel,
+		Scheme: embedder.Scheme(), QueryPrefix: cfg.EmbeddingQueryPrefix, Cases: len(cases),
+	}
+	results := Results{Settings: cur, Cases: caseResults(cases, outs, scores)}
+	printReport(cur, cases, outs, separation(results.Cases))
 
-	if writeBaseline {
-		data, _ := json.MarshalIndent(cur, "", "  ")
-		if err := os.WriteFile(baselinePath, append(data, '\n'), 0o644); err != nil {
+	if o.out != "" {
+		if err := writeResults(o.out, results); err != nil {
 			return err
 		}
-		fmt.Printf("\nBaseline written to %s\n", baselinePath)
+	}
+	if o.writeBaseline {
+		data, _ := json.MarshalIndent(cur, "", "  ")
+		if err := os.WriteFile(o.baseline, append(data, '\n'), 0o644); err != nil {
+			return err
+		}
+		fmt.Printf("\nBaseline written to %s\n", o.baseline)
 		return nil
 	}
-	return gate(cur, baselinePath, tolerance)
+	return gate(cur, o.baseline, o.tolerance)
+}
+
+// caseResults pairs each case's filtered outcome with its best unfiltered score.
+func caseResults(cases []Case, outs []outcome, scores [][]float64) []CaseResult {
+	rs := make([]CaseResult, len(cases))
+	for i, c := range cases {
+		rs[i] = CaseResult{Question: c.Question, Source: c.Source, Rank: outs[i].rank, Hits: outs[i].hits}
+		if len(scores[i]) > 0 {
+			rs[i].BestScore = slices.Max(scores[i])
+		}
+	}
+	return rs
 }
 
 func loadCases(path string) ([]Case, error) {
@@ -299,7 +356,7 @@ func score(cases []Case, outs []outcome) Metrics {
 	return m
 }
 
-func printReport(b Baseline, cases []Case, outs []outcome) {
+func printReport(b Baseline, cases []Case, outs []outcome, separationAUC float64) {
 	lat := make([]time.Duration, len(outs))
 	for i, o := range outs {
 		lat[i] = o.latency
@@ -327,11 +384,12 @@ func printReport(b Baseline, cases []Case, outs []outcome) {
 	}
 
 	fmt.Printf("## Retrieval eval\n\n")
-	fmt.Printf("%d cases · k=%d · min_score=%.2f · %s\n\n", b.Cases, b.K, b.MinScore, b.Model)
+	fmt.Printf("%d cases · k=%d · min_score=%.2f · %s · query prefix %q\n\n", b.Cases, b.K, b.MinScore, b.Scheme, b.QueryPrefix)
 	fmt.Printf("| Metric | Value |\n|---|---:|\n")
 	fmt.Printf("| Recall@1 | %.3f |\n| Recall@%d | %.3f |\n| MRR@%d | %.3f |\n", b.RecallAt1, b.K, b.RecallAtK, b.K, b.MRR)
 	fmt.Printf("| Abstention (out-of-scope) | %.3f |\n", b.Abstention)
 	fmt.Printf("| Misses (right file / wrong file) | %d / %d |\n", rightFile, wrongFile)
+	fmt.Printf("| Separation AUC (best score, in- vs out-of-scope) | %.3f |\n", separationAUC)
 	fmt.Printf("| Latency p50 / p95 | %s / %s |\n", pct(0.5), pct(0.95))
 
 	if len(misses) > 0 {
@@ -373,8 +431,9 @@ func gate(cur Baseline, path string, tolerance float64) error {
 	if err := json.Unmarshal(raw, &base); err != nil {
 		return fmt.Errorf("parse baseline: %w", err)
 	}
-	if base.K != cur.K || base.MinScore != cur.MinScore || base.Model != cur.Model || base.Cases != cur.Cases {
-		return fmt.Errorf("settings differ from baseline (k, min_score, model or case count); re-baseline with -write-baseline")
+	if base.K != cur.K || base.MinScore != cur.MinScore || base.Model != cur.Model || base.Scheme != cur.Scheme ||
+		base.QueryPrefix != cur.QueryPrefix || base.Cases != cur.Cases {
+		return fmt.Errorf("settings differ from baseline (k, min_score, model, prefixes or case count); re-baseline with -write-baseline")
 	}
 
 	var failed []string

@@ -71,15 +71,12 @@ func (r *Retriever) Search(ctx context.Context, history []llm.Message) ([]Search
 		return nil, nil
 	}
 
-	vecs, err := r.embedder.Embed(ctx, []string{query})
+	vec, err := r.embedder.EmbedQuery(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("embed query: %w", err)
 	}
-	if len(vecs) == 0 {
-		return nil, nil
-	}
 
-	hits, err := r.store.Query(ctx, vecs[0], r.topK)
+	hits, err := r.store.Query(ctx, vec, r.topK)
 	if err != nil {
 		return nil, fmt.Errorf("vector query: %w", err)
 	}

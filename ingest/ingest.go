@@ -79,7 +79,7 @@ func index(ctx context.Context, source, text string, extra map[string]string, op
 		return 0, errors.New("document is empty")
 	}
 
-	vectors, err := embedder.Embed(ctx, chunks)
+	vectors, err := embedder.EmbedDocuments(ctx, chunks)
 	if err != nil {
 		return 0, fmt.Errorf("embed: %w", err)
 	}
@@ -91,10 +91,11 @@ func index(ctx context.Context, source, text string, extra map[string]string, op
 	docs := make([]vector.Document, len(chunks))
 	for i, c := range chunks {
 		meta := map[string]string{
-			"source":      source,
-			"chunk_index": strconv.Itoa(i),
-			"chunks":      strconv.Itoa(len(chunks)),
-			"ingested_at": ingestedAt,
+			"source":       source,
+			"chunk_index":  strconv.Itoa(i),
+			"chunks":       strconv.Itoa(len(chunks)),
+			"ingested_at":  ingestedAt,
+			"embed_scheme": embedder.Scheme(),
 		}
 		maps.Copy(meta, extra)
 		docs[i] = vector.Document{

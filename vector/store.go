@@ -11,7 +11,8 @@ type Document struct {
 	ID      string
 	Content string
 	// Metadata is round-tripped verbatim. Keys used today: source,
-	// chunk_index, chunks, ingested_at, and for images type/image_path.
+	// chunk_index, chunks, ingested_at, embed_scheme, and for images
+	// type/image_path.
 	Metadata  map[string]string
 	Embedding []float32
 }

@@ -7,6 +7,7 @@ import (
 	"godocs-rag/config"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 )
 
@@ -40,7 +41,7 @@ func TestEmbedBatchesAndPreservesOrder(t *testing.T) {
 	for i := range texts {
 		texts[i] = fmt.Sprint(i)
 	}
-	vecs, err := c.Embed(context.Background(), texts)
+	vecs, err := c.EmbedDocuments(context.Background(), texts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,5 +52,46 @@ func TestEmbedBatchesAndPreservesOrder(t *testing.T) {
 		if int(v[0]) != i {
 			t.Fatalf("vecs[%d] = %v, out of order", i, v)
 		}
+	}
+}
+
+// Queries and documents get their own configured prefix; stored text is
+// never changed, only what is sent to the model.
+func TestEmbedAddsTaskPrefixes(t *testing.T) {
+	var sent []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct{ Input []string }
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Error(err)
+		}
+		sent = append(sent, req.Input...)
+		data := make([]map[string]any, len(req.Input))
+		for i := range data {
+			data[i] = map[string]any{"object": "embedding", "index": i, "embedding": []float64{0}}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data, "model": "m"})
+	}))
+	defer srv.Close()
+
+	c := NewEmbedder(config.Config{EmbeddingBaseURL: srv.URL, EmbeddingModel: "m",
+		EmbeddingQueryPrefix: "q: ", EmbeddingDocumentPrefix: "d: "})
+	if _, err := c.EmbedDocuments(context.Background(), []string{"doc"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.EmbedQuery(context.Background(), "question"); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"d: doc", "q: question"}; !slices.Equal(sent, want) {
+		t.Fatalf("sent %q, want %q", sent, want)
+	}
+}
+
+// Stored vectors depend on the model and the document prefix, so both
+// name the scheme; the query prefix doesn't change what is stored.
+func TestEmbedderSchemeNamesModelAndDocumentPrefix(t *testing.T) {
+	c := NewEmbedder(config.Config{EmbeddingModel: "m", EmbeddingQueryPrefix: "q: ", EmbeddingDocumentPrefix: "d: "})
+	if got := c.Scheme(); got != "m|d: " {
+		t.Fatalf("Scheme() = %q, want %q", got, "m|d: ")
 	}
 }
