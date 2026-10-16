@@ -25,4 +25,3 @@ func TestValidateRejectsSameDirectories(t *testing.T) {
 		t.Fatal("expected same-directory validation error")
 	}
 }
-
