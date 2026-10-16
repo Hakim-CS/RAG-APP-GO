@@ -15,6 +15,7 @@ Measured by `go run ./cmd/eval` over 117 in-scope and 30 out-of-scope questions 
 | MRR@5 | 0.405 |
 | Out-of-scope abstention | 0.500 |
 | Misses: right file / wrong file | 50 / 1 |
+| Separation AUC (best score, in- vs out-of-scope) | 0.977 |
 | Query latency p50 / p95 (embed + search, local Ollama) | 28 ms / 122 ms |
 
 These are honest baseline numbers for plain vector search, not a finished system. The eval shows *where* it fails:
@@ -24,6 +25,20 @@ These are honest baseline numbers for plain vector search, not a finished system
 
 That is what the next retrieval changes target (see [Roadmap](#roadmap)), and the gate makes each one prove itself.
 
+### Experiment: embedding task prefixes (no significant gain, not shipped)
+
+`nomic-embed-text` was trained with `search_query: ` / `search_document: ` prefixes, and its model card says inputs must include them. Before testing them, the served model was checked against Nomic's reference implementation: Ollama's vectors match `nomic-embed-text-v1.5` (sentence-transformers) at cosine 1.00000 on 20 texts with and without prefixes, and 0.81–0.88 against v1. Every variant was then measured with a full re-index, with no relevance floor so they compete on ranking alone, and compared question by question against no prefix:
+
+| Variant | Recall@1 | Recall@5 | MRR | Separation AUC | vs none: R@1 flips (McNemar p) | MRR Δ, 95% bootstrap CI |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| No prefix (run twice: identical) | 0.299 | 0.573 | 0.410 | 0.977 | | |
+| Query only | 0.308 | 0.581 | 0.412 | 0.983 | +3 −2 (1.00) | +0.002 [−0.022, +0.026] |
+| Document only | 0.333 | 0.598 | 0.424 | 0.957 | +8 −4 (0.39) | +0.014 [−0.025, +0.055] |
+| **Both, as documented** (run twice: identical) | 0.342 | 0.564 | 0.421 | 0.978 | +8 −3 (0.23) | +0.012 [−0.027, +0.051] |
+| Swapped (negative control) | 0.231 | 0.573 | 0.356 | 0.929 | +1 −9 (**0.02**) | **−0.053 [−0.093, −0.016]** |
+
+The swapped control is significantly worse, so the eval can detect a prefix mistake. The documented prefixes lean better at rank 1 but no difference is significant, so the default stays unprefixed. The prefixes remain switchable (`EMBEDDING_QUERY_PREFIX`, `EMBEDDING_DOCUMENT_PREFIX`) and will be re-tested after the chunking change, since 50 of 51 misses are passage-ranking problems that prefixes can't fix. Reproduce with `go run ./cmd/eval -min-score 0 -out a.json` per variant and `go run ./cmd/eval -compare a.json b.json`.
+
 ## How it works
 
 ```text
@@ -32,7 +47,7 @@ That is what the next retrieval changes target (see [Roadmap](#roadmap)), and th
 ```
 
 - **Store:** one Postgres table with an HNSW cosine index and JSONB metadata. Re-ingesting a file replaces its chunks atomically: a failed embed or insert leaves the previous version intact.
-- **Relevance floor:** chunks below `RETRIEVAL_MIN_SCORE` (0.55) are dropped. When nothing survives, the model is told to say the docs don't cover the question. The value was picked from the eval's sweep as the highest floor that loses at most one in-scope hit (it loses 1 of 117). At that floor it refuses 15 of 30 out-of-scope questions: 10 of the 12 unrelated ones, 5 of the 18 near-domain ones.
+- **Relevance floor:** chunks below `RETRIEVAL_MIN_SCORE` (0.55) are dropped. When nothing survives, the model is told to say the docs don't cover the question. The value is the highest floor that loses no in-scope hit on the *dev* half of the questions (`-split dev -sweep`); the other half is only used for reporting. On the test half it gives recall@5 0.623 and refuses 5 of 14 out-of-scope questions; on all questions it refuses 15 of 30 (10 of the 12 unrelated ones, 5 of the 18 near-domain ones). The gap is a threshold problem, not a ranking one: the best score ranks in-scope above out-of-scope questions 97.7% of the time (AUC), but a floor high enough to refuse more also drops real answers.
 - **Providers:** any OpenAI-compatible endpoint (Ollama, OpenAI, LM Studio, vLLM). Chat and embeddings can point at different hosts.
 - **Interfaces:** terminal REPL, web chat with SSE streaming at `/chat`, document and image upload, `/healthz` and `/readyz`.
 
@@ -70,7 +85,13 @@ go run ./cmd/eval                  # report + gate against eval/baseline.json
 go run ./cmd/eval -skip-ingest     # reuse the indexed corpus while iterating
 go run ./cmd/eval -sweep           # recall vs abstention for each min-score value
 go run ./cmd/eval -write-baseline  # accept the current numbers
+go run ./cmd/eval -split dev -sweep            # tune the floor on half the questions
+go run ./cmd/eval -split test                  # report on the other half
+go run ./cmd/eval -out a.json                  # also save per-question results
+go run ./cmd/eval -compare a.json b.json       # flips, McNemar p, MRR bootstrap CI, AUC
 ```
+
+The eval refuses to run on an index embedded with a different model or document prefix than the current settings (each chunk records its `embed_scheme`).
 
 ### Tests
 
@@ -87,6 +108,7 @@ TEST_DATABASE_URL=postgres://rag:eval@localhost:5433/rag_eval?sslmode=disable go
 | `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL` | Chat endpoint. Ollama: `http://localhost:11434/v1`, key `ollama`. |
 | `EMBEDDING_BASE_URL`, `EMBEDDING_API_KEY`, `EMBEDDING_MODEL` | Embedding endpoint; defaults to the chat endpoint. |
 | `EMBEDDING_DIM` | Must match the embedding model (768 for `nomic-embed-text`). Fixed into the schema on first run. |
+| `EMBEDDING_QUERY_PREFIX`, `EMBEDDING_DOCUMENT_PREFIX` | Text prepended before embedding (default none; see the prefix experiment). |
 | `RETRIEVAL_MIN_SCORE` | Similarity floor for retrieved chunks (default 0.55, 0 disables). |
 | `DATABASE_URL`, `POSTGRES_PASSWORD` | App database; the compose file reads the password. |
 | `EVAL_DATABASE_URL` | Eval database (truncated on every run). |
@@ -95,7 +117,7 @@ TEST_DATABASE_URL=postgres://rag:eval@localhost:5433/rag_eval?sslmode=disable go
 | `HTTP_ADDR` | Web server address (default `127.0.0.1:8080`). |
 | `VISION_MODEL` | Optional model for `/api/caption`. |
 
-Changing the embedding model or dimension requires a fresh table: `docker compose down -v` (this deletes the local database volume) and re-ingest.
+Changing the embedding model or dimension requires a fresh table: `docker compose down -v` (this deletes the local database volume) and re-ingest. Changing the document prefix only needs a re-ingest; the app logs a warning at startup when stored chunks were embedded differently.
 
 ## HTTP API
 

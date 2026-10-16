@@ -11,6 +11,8 @@ import (
 	"errors"
 	"fmt"
 	"godocs-rag/vector"
+	"slices"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -174,6 +176,52 @@ func (s *Store) Query(ctx context.Context, embedding []float32, topK int) ([]vec
 		results = append(results, r)
 	}
 	return results, rows.Err()
+}
+
+// CheckScheme reports an error when stored chunks were embedded with a
+// scheme other than want. Mixing schemes doesn't fail loudly: queries
+// still return results, just worse ones.
+func (s *Store) CheckScheme(ctx context.Context, want string) error {
+	counts, err := s.embedSchemes(ctx)
+	if err != nil {
+		return err
+	}
+	return schemeErr(counts, want)
+}
+
+// embedSchemes counts rows by embed_scheme; rows without one count as "".
+func (s *Store) embedSchemes(ctx context.Context) (map[string]int, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT coalesce(metadata->>'embed_scheme', ''), count(*)
+		FROM documents GROUP BY 1`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	counts := map[string]int{}
+	for rows.Next() {
+		var scheme string
+		var n int
+		if err := rows.Scan(&scheme, &n); err != nil {
+			return nil, err
+		}
+		counts[scheme] = n
+	}
+	return counts, rows.Err()
+}
+
+func schemeErr(counts map[string]int, want string) error {
+	var other []string
+	for scheme, n := range counts {
+		if scheme != want {
+			other = append(other, fmt.Sprintf("%d chunks as %q", n, scheme))
+		}
+	}
+	if len(other) == 0 {
+		return nil
+	}
+	slices.Sort(other)
+	return fmt.Errorf("index has %s, but this run embeds as %q; re-ingest the documents", strings.Join(other, ", "), want)
 }
 
 // Reset deletes every row. Used by the eval harness, which owns its

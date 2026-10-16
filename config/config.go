@@ -37,6 +37,14 @@ type Config struct {
 	EmbeddingAPIKey  string
 	EmbeddingModel   string
 
+	// EmbeddingQueryPrefix and EmbeddingDocumentPrefix are prepended to
+	// text before embedding (stored text is unchanged). nomic-embed-text
+	// was trained with "search_query: " / "search_document: ", but on this
+	// corpus they gave no significant gain (see README), so the default is
+	// none. Re-test with cmd/eval -compare after retrieval changes.
+	EmbeddingQueryPrefix    string
+	EmbeddingDocumentPrefix string
+
 	// MinScore is the cosine-similarity floor for retrieved chunks; see
 	// rag.Options.MinScore. Tuned with cmd/eval.
 	MinScore float64
@@ -80,21 +88,23 @@ func Load() Config {
 	_ = godotenv.Load() // a missing .env is fine
 
 	cfg := Config{
-		BaseURL:          envOr("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-		APIKey:           os.Getenv("OPENAI_API_KEY"),
-		Model:            envOr("OPENAI_MODEL", "gpt-4o-mini"),
-		SystemPromptFile: os.Getenv("SYSTEM_PROMPT_FILE"),
-		DatabaseURL:      os.Getenv("DATABASE_URL"),
-		EmbeddingDim:     atoiOr(os.Getenv("EMBEDDING_DIM"), 768),
-		EmbeddingBaseURL: os.Getenv("EMBEDDING_BASE_URL"),
-		EmbeddingAPIKey:  os.Getenv("EMBEDDING_API_KEY"),
-		EmbeddingModel:   envOr("EMBEDDING_MODEL", "nomic-embed-text"),
-		MinScore:         floatOr(os.Getenv("RETRIEVAL_MIN_SCORE"), DefaultMinScore),
-		IngestDir:        envOr("INGEST_DIR", "./documents"),
-		ProcessedDir:     envOr("PROCESSED_DIR", "./documents/processed"),
-		HTTPAddr:         envOr("HTTP_ADDR", "127.0.0.1:8080"),
-		ImageDir:         envOr("IMAGES_DIR", "./documents/images"),
-		VisionModel:      os.Getenv("VISION_MODEL"),
+		BaseURL:                 envOr("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+		APIKey:                  os.Getenv("OPENAI_API_KEY"),
+		Model:                   envOr("OPENAI_MODEL", "gpt-4o-mini"),
+		SystemPromptFile:        os.Getenv("SYSTEM_PROMPT_FILE"),
+		DatabaseURL:             os.Getenv("DATABASE_URL"),
+		EmbeddingDim:            atoiOr(os.Getenv("EMBEDDING_DIM"), 768),
+		EmbeddingBaseURL:        os.Getenv("EMBEDDING_BASE_URL"),
+		EmbeddingAPIKey:         os.Getenv("EMBEDDING_API_KEY"),
+		EmbeddingModel:          envOr("EMBEDDING_MODEL", "nomic-embed-text"),
+		EmbeddingQueryPrefix:    os.Getenv("EMBEDDING_QUERY_PREFIX"),
+		EmbeddingDocumentPrefix: os.Getenv("EMBEDDING_DOCUMENT_PREFIX"),
+		MinScore:                floatOr(os.Getenv("RETRIEVAL_MIN_SCORE"), DefaultMinScore),
+		IngestDir:               envOr("INGEST_DIR", "./documents"),
+		ProcessedDir:            envOr("PROCESSED_DIR", "./documents/processed"),
+		HTTPAddr:                envOr("HTTP_ADDR", "127.0.0.1:8080"),
+		ImageDir:                envOr("IMAGES_DIR", "./documents/images"),
+		VisionModel:             os.Getenv("VISION_MODEL"),
 	}
 
 	// Reuse the chat endpoint for embeddings unless one is set. The chat

@@ -42,6 +42,12 @@ func Run(parent context.Context, cfg config.Config) error {
 	if store != nil {
 		defer store.Close()
 		logger.Printf("vector store ready")
+		// A mismatch still returns results, just worse ones, so say so.
+		if pg, ok := store.(*pgvector.Store); ok {
+			if err := pg.CheckScheme(ctx, embedder.Scheme()); err != nil {
+				logger.Printf("warning: %v", err)
+			}
+		}
 
 		wg.Go(func() {
 			opts := ingest.Options{SourceDir: cfg.IngestDir, ProcessedDir: cfg.ProcessedDir}

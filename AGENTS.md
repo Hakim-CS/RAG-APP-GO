@@ -9,7 +9,8 @@ go build ./... && go vet ./... && go test -race ./...
 docker compose up -d                              # app DB on :5432 (creds in .env)
 docker compose --profile eval up -d eval-db       # eval/test DB on :5433, rag/eval, tmpfs
 TEST_DATABASE_URL=postgres://rag:eval@localhost:5433/rag_eval?sslmode=disable go test ./vector/pgvector/
-EVAL_DATABASE_URL=postgres://rag:eval@localhost:5433/rag_eval?sslmode=disable go run ./cmd/eval [-skip-ingest|-sweep|-write-baseline]
+EVAL_DATABASE_URL=postgres://rag:eval@localhost:5433/rag_eval?sslmode=disable go run ./cmd/eval [-skip-ingest|-sweep|-write-baseline|-split dev|test|-out f.json]
+go run ./cmd/eval -compare a.json b.json         # paired: flips, McNemar, MRR bootstrap CI, AUC
 go run ./cmd/corpus                               # regenerate corpus/ from `go doc -all`
 go run ./cmd/rag                                  # app: REPL + web (127.0.0.1:8080/chat) + watcher
 ```
@@ -20,7 +21,7 @@ The full eval ingest takes about 3 minutes on local Ollama. Use `-skip-ingest` w
 
 - `cmd/rag` → `app.Run`: wires `llm` clients, `vector/pgvector` store, `ingest.Watch`, `web.Server`, `chat.RunREPL`.
 - `ingest.index` is the single chunk → embed → `store.ReplaceSource` path for text and images.
-- `rag.Retriever.Search` handles rewrite → embed → `store.Query` → `MinScore` filter. `rag.WithContext` prepends excerpts to the last user turn (shared by REPL and web).
+- `rag.Retriever.Search` handles rewrite → `EmbedQuery` → `store.Query` → `MinScore` filter. Documents go through `EmbedDocuments`; each chunk records `embed_scheme` (model + document prefix), and the eval refuses a mixed index. `rag.WithContext` prepends excerpts to the last user turn (shared by REPL and web).
 - `vector.Store` has only `ReplaceSource`, `Query` and `Close`. Don't add methods nothing calls. `pgvector.Store.Reset` is eval-only.
 - `cmd/eval` uses the same `rag.Retriever` the app uses. **The eval must test what ships.** Don't give it a separate retrieval path.
 
@@ -29,7 +30,8 @@ The full eval ingest takes about 3 minutes on local Ollama. Use `-skip-ingest` w
 - `eval/golden.jsonl`: `{"q", "source", "contains"}`. A hit is a chunk from `source` that contains `contains` (case-insensitive). No source means out of scope, which passes when nothing is retrieved. Labels are validated against `corpus/` at startup.
 - Write questions the way a developer would ask them. Don't copy doc wording, or the set becomes trivially easy.
 - `eval/baseline.json` is the CI gate (tolerance 0.02). Re-baseline only for a deliberate change (new model, k, min_score, cases, or an improvement) and state the before/after numbers in the commit message.
-- `config.DefaultMinScore` (0.55) was chosen from `-sweep`. If retrieval changes, re-sweep and update both the constant and the baseline.
+- `config.DefaultMinScore` (0.55) was chosen with `-split dev -sweep` (highest floor losing no dev in-scope hit) and reported on `-split test`. If retrieval changes, re-sweep and update both the constant and the baseline.
+- Claim an improvement only with `-compare` evidence (McNemar / bootstrap CI), never from one aggregate number.
 - `corpus/` and `eval/` are pinned to LF (`.gitattributes`). CRLF would change chunk boundaries and therefore the numbers.
 
 ## Conventions
@@ -46,4 +48,4 @@ The full eval ingest takes about 3 minutes on local Ollama. Use `-skip-ingest` w
 
 ## Roadmap (next, in order)
 
-Hybrid FTS + vector with RRF → nomic `search_query:`/`search_document:` prefixes and declaration-aware chunking → verified structured citations → server-side sessions, upload auth and rate limiting. Each one must move the eval numbers.
+Declaration-aware chunking (then re-test nomic prefixes: no significant gain at byte chunking) → hybrid FTS + vector with RRF → verified structured citations → server-side sessions, upload auth and rate limiting. Each one must move the eval numbers.
